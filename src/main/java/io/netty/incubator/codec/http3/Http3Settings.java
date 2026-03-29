@@ -286,6 +286,31 @@ public final class Http3Settings implements Iterable<Map.Entry<Long, Long>> {
     }
 
     /**
+     * Returns whether the {@code ENABLE_WEBTRANSPORT} setting is enabled.
+     *
+     * @return {@code true} if enabled, {@code false} if disabled, or {@code null} if not set
+     */
+    @Nullable
+    public Boolean webTransportEnabled() {
+        Long value = get(Http3SettingIdentifier.HTTP3_SETTINGS_WEBTRANSPORT_ENABLE.id());
+        return value == null ? null : value > 0;
+    }
+
+    /**
+     * Sets the {@code ENABLE_WEBTRANSPORT} flag.
+     * <p>
+     * When enabling WebTransport, also ensure {@link #enableConnectProtocol(boolean)} and
+     * {@link #enableH3Datagram(boolean)} are set to {@code true}.
+     *
+     * @param enabled whether to enable WebTransport
+     * @return this instance for method chaining
+     */
+    public Http3Settings enableWebTransport(boolean enabled) {
+        put(Http3SettingIdentifier.HTTP3_SETTINGS_WEBTRANSPORT_ENABLE.id(), enabled ? TRUE : FALSE);
+        return this;
+    }
+
+    /**
      * Replaces all current settings with those from another {@link Http3Settings} instance.
      *
      * @param http3Settings the source settings (non-null)
@@ -419,6 +444,12 @@ public final class Http3Settings implements Iterable<Map.Entry<Long, Long>> {
                             "Invalid: " + value + "for "
                                     + Http3SettingIdentifier.valueOf(String.valueOf(identifier))
                             + " (expected 0 or 1)");
+                }
+                break;
+            case HTTP3_SETTINGS_WEBTRANSPORT_ENABLE:
+                if (value < 0) {
+                    throw new IllegalArgumentException("Setting 0x"
+                            + toHexString(identifier.id()) + " invalid: " + value + " (must be >= 0)");
                 }
                 break;
             default:

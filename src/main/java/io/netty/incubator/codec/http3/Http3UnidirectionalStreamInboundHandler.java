@@ -36,6 +36,7 @@ import static io.netty.incubator.codec.http3.Http3CodecUtils.HTTP3_PUSH_STREAM_T
 import static io.netty.incubator.codec.http3.Http3CodecUtils.HTTP3_QPACK_DECODER_STREAM_TYPE;
 import static io.netty.incubator.codec.http3.Http3CodecUtils.HTTP3_QPACK_ENCODER_STREAM_TYPE;
 import static io.netty.incubator.codec.http3.Http3RequestStreamCodecState.NO_STATE;
+import static io.netty.incubator.codec.http3.WebTransportCodecUtils.WT_STREAM_TYPE_UNIDIRECTIONAL;
 
 /**
  * {@link ByteToMessageDecoder} which helps to detect the type of unidirectional stream.
@@ -105,6 +106,16 @@ abstract class Http3UnidirectionalStreamInboundHandler extends ByteToMessageDeco
                 // See https://quicwg.org/base-drafts/draft-ietf-quic-qpack.html#enc-dec-stream-def
                 initQpackDecoderStream(ctx);
                 break;
+            case WT_STREAM_TYPE_UNIDIRECTIONAL:
+                // WebTransport unidirectional stream — read the session ID varint.
+                // See https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/
+                int sessionIdLen = Http3CodecUtils.numBytesForVariableLengthInteger(in.getByte(in.readerIndex()));
+                if (in.readableBytes() < sessionIdLen) {
+                    return;
+                }
+                long sessionId = Http3CodecUtils.readVariableLengthInteger(in, sessionIdLen);
+                initWebTransportUnidirectionalStream(ctx, sessionId);
+                break;
             default:
                 initUnknownStream(ctx, type);
                 break;
@@ -139,6 +150,24 @@ abstract class Http3UnidirectionalStreamInboundHandler extends ByteToMessageDeco
      * <a href="https://tools.ietf.org/html/draft-ietf-quic-http-32#section-6.2.2">push stream</a>.
      */
     abstract void initPushStream(ChannelHandlerContext ctx, long id);
+
+    /**
+     * Called if the current {@link Channel} is a WebTransport unidirectional stream
+     * (stream type {@code 0x54}).
+     * <p>
+     * The session ID has already been read from the stream. Implementations should look up the
+     * session in the {@link WebTransportSessionRegistry} and route accordingly. If the session is
+     * unknown, close the connection with {@link Http3ErrorCode#H3_ID_ERROR}.
+     *
+     * @param ctx       the channel handler context
+     * @param sessionId the WebTransport session ID encoded in the stream prefix
+     */
+    void initWebTransportUnidirectionalStream(ChannelHandlerContext ctx, long sessionId) {
+        // Default: treat as unknown — close with H3_ID_ERROR if no override.
+        Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_ID_ERROR,
+                "Received WebTransport unidirectional stream with session ID " + sessionId
+                        + " but WebTransport is not enabled.", false);
+    }
 
     /**
      * Called if the current {@link Channel} is a

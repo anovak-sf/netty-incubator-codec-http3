@@ -76,16 +76,28 @@ public enum Http3SettingIdentifier {
     HTTP3_SETTINGS_ENABLE_CONNECT_PROTOCOL(0x8),
 
     /**
-     * ENABLE_H3_DATAGRAM setting identifier (<b>0x8</b>).
+     * ENABLE_H3_DATAGRAM setting identifier (<b>0x33</b>).
      * <p>
      * Defined and registered in <a href="https://datatracker.ietf.org/doc/html/rfc9297#name-http-3-setting">
-     * RFC 9220, Section 5 (IANA Considerations)</a> and registered in
+     * RFC 9297, HTTP Datagrams and the Capsule Protocol</a> and registered in
      * the <a href="https://www.iana.org/assignments/http3-parameters/http3-parameters.xhtml#settings">
      * HTTP/3 SETTINGS registry (IANA)</a>.
      * <br>
-     * Enables use of the CONNECT protocol in HTTP/3 when set to 1; disabled when 0.
+     * Enables the use of HTTP/3 datagrams when set to 1; disabled when 0.
      */
-    HTTP3_SETTINGS_H3_DATAGRAM(0x33);
+    HTTP3_SETTINGS_H3_DATAGRAM(0x33),
+
+    /**
+     * ENABLE_WEBTRANSPORT setting identifier (<b>0x2b603742</b>).
+     * <p>
+     * Defined in <a href="https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/">
+     * WebTransport over HTTP/3</a>.
+     * <br>
+     * Enables WebTransport over HTTP/3 when set to a value greater than 0; disabled when 0.
+     * Requires {@link #HTTP3_SETTINGS_ENABLE_CONNECT_PROTOCOL} and {@link #HTTP3_SETTINGS_H3_DATAGRAM}
+     * to also be enabled.
+     */
+    HTTP3_SETTINGS_WEBTRANSPORT_ENABLE(0x2b603742L);
 
     private final long id;
 

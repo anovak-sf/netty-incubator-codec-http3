@@ -17,6 +17,8 @@ package io.netty.incubator.codec.http3;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelPromise;
 import io.netty.incubator.codec.quic.QuicChannel;
 import io.netty.incubator.codec.quic.QuicClientCodecBuilder;
 import io.netty.incubator.codec.quic.QuicCodecBuilder;
@@ -26,6 +28,7 @@ import io.netty.incubator.codec.quic.QuicStreamChannelBootstrap;
 import io.netty.incubator.codec.quic.QuicStreamType;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -163,6 +166,83 @@ public final class Http3 {
     private static <T extends QuicCodecBuilder<T>> T configure(T builder) {
         return builder.initialMaxStreamsUnidirectional(MIN_INITIAL_MAX_STREAMS_UNIDIRECTIONAL)
                 .initialMaxStreamDataUnidirectional(MIN_INITIAL_MAX_STREAM_DATA_UNIDIRECTIONAL);
+    }
+
+    /**
+     * Establishes a new WebTransport session over the given QUIC connection.
+     * <p>
+     * Creates a new HTTP/3 bidirectional stream, sends an Extended CONNECT request using the provided
+     * {@code connectHeaders} (must include {@code :method=CONNECT}, {@code :protocol=webtransport},
+     * {@code :scheme}, {@code :authority}, and {@code :path}), and awaits a 2xx response.
+     * <p>
+     * On success the returned future completes with the established {@link WebTransportSession}.
+     * On failure (non-2xx response, connection error, or timeout) the future completes exceptionally.
+     * <p>
+     * <strong>Prerequisite:</strong> The QUIC connection must have been established with
+     * {@link Http3WebTransportServerConnectionHandler} on the server side and
+     * {@link Http3ClientConnectionHandler} configured with
+     * {@link Http3Settings#enableWebTransport(boolean) enableWebTransport(true)},
+     * {@link Http3Settings#enableConnectProtocol(boolean) enableConnectProtocol(true)}, and
+     * {@link Http3Settings#enableH3Datagram(boolean) enableH3Datagram(true)} on the client side.
+     *
+     * @param channel        the QUIC connection channel
+     * @param connectHeaders Extended CONNECT headers (ownership not transferred; may be reused)
+     * @param listener       listener for session events (streams, datagrams, close)
+     * @return a future that completes with the ready {@link WebTransportSession}
+     */
+    public static Future<WebTransportSession> newWebTransportSession(
+            QuicChannel channel,
+            Http3Headers connectHeaders,
+            WebTransportSessionListener listener) {
+
+        final Promise<WebTransportSession> sessionPromise = channel.eventLoop().newPromise();
+
+        channel.createStream(QuicStreamType.BIDIRECTIONAL, new ChannelInitializer<QuicStreamChannel>() {
+            @Override
+            protected void initChannel(QuicStreamChannel ch) throws Exception {
+                Http3ConnectionHandler connectionHandler =
+                        Http3CodecUtils.getConnectionHandlerOrClose(channel);
+                if (connectionHandler == null) {
+                    sessionPromise.setFailure(new IllegalStateException(
+                            "Http3ConnectionHandler not found on the parent channel pipeline"));
+                    ch.close();
+                    return;
+                }
+                ChannelPromise promise = ch.newPromise();
+                promise.addListener(f -> {
+                    if (f.isSuccess()) {
+                        WebTransportSessionRegistry registry = channel.attr(
+                                WebTransportSessionRegistry.REGISTRY_KEY).get();
+                        if (registry == null) {
+                            sessionPromise.setFailure(new IllegalStateException(
+                                    "WebTransportSessionRegistry not found — was the session established?"));
+                            return;
+                        }
+                        // Find the just-registered session by stream ID.
+                        WebTransportSession session = registry.find(ch.streamId());
+                        if (session != null) {
+                            sessionPromise.trySuccess(session);
+                        } else {
+                            sessionPromise.setFailure(new IllegalStateException(
+                                    "Session not registered after successful establishment"));
+                        }
+                    } else {
+                        sessionPromise.tryFailure(f.cause());
+                    }
+                });
+
+                Http3RequestStreamEncodeStateValidator encodeState = new Http3RequestStreamEncodeStateValidator();
+                Http3RequestStreamDecodeStateValidator decodeState = new Http3RequestStreamDecodeStateValidator();
+                ch.pipeline().addLast(connectionHandler.newCodec(encodeState, decodeState));
+                ch.pipeline().addLast(encodeState);
+                ch.pipeline().addLast(decodeState);
+                ch.pipeline().addLast(
+                        connectionHandler.newRequestStreamValidationHandler(ch, encodeState, decodeState));
+                ch.pipeline().addLast(new WebTransportClientSessionHandler(connectHeaders, listener, promise));
+            }
+        });
+
+        return sessionPromise;
     }
 
     private static Http3RequestStreamInitializer requestStreamInitializer(ChannelHandler handler) {
