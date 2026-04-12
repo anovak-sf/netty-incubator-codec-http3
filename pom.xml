@@ -360,6 +360,15 @@
           <plugin>
             <artifactId>maven-deploy-plugin</artifactId>
             <version>2.8.2</version>
+            <executions>
+              <execution>
+                <id>jfrog-deploy</id>
+                <phase>deploy</phase>
+                <goals>
+                  <goal>deploy</goal>
+                </goals>
+              </execution>
+            </executions>
             <configuration>
               <retryFailedDeploymentCount>3</retryFailedDeploymentCount>
             </configuration>
