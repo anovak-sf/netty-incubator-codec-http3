@@ -4,7 +4,7 @@
   BASE_VERSION=0.0.31.3.wtransport
   VERSION=${BASE_VERSION}-SNAPSHOT
   BASE=https://secfotech.jfrog.io/artifactory/sophon-power-custom-3rd-party-local
-  M2_REPO=/Users/alesnovak/.m2/repository/io/netty/incubator/netty-incubator-codec-http3/$VERSION
+  M2_REPO=$HOME/.m2/repository/io/netty/incubator/netty-incubator-codec-http3/$VERSION
   PATH_PREFIX=io/netty/incubator/netty-incubator-codec-http3/$VERSION
   ARTIFACT=netty-incubator-codec-http3
   SNAPSHOT_VERSION=${BASE_VERSION}-SNAPSHOT
