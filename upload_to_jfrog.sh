@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
   set -e
 
+  BASE_VERSION=0.0.31.1.wtransport
+  VERSION=${BASE_VERSION}-SNAPSHOT
   BASE=https://secfotech.jfrog.io/artifactory/sophon-power-custom-3rd-party-local
-  M2_REPO=/Users/alesnovak/.m2/repository/io/netty/incubator/netty-incubator-codec-http3/0.0.31.wtransport-SNAPSHOT
-  PATH_PREFIX=io/netty/incubator/netty-incubator-codec-http3/0.0.31.wtransport-SNAPSHOT
+  M2_REPO=/Users/alesnovak/.m2/repository/io/netty/incubator/netty-incubator-codec-http3/$VERSION
+  PATH_PREFIX=io/netty/incubator/netty-incubator-codec-http3/$VERSION
   ARTIFACT=netty-incubator-codec-http3
-  BASE_VERSION=0.0.31.wtransport
   SNAPSHOT_VERSION=${BASE_VERSION}-SNAPSHOT
   USER=$JFROG_SECFOTECH_USER
   TOKEN=$JFROG_SECFOTECH_TOKEN
