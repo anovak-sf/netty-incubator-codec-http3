@@ -121,10 +121,12 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
             return;
         }
 
-        // Accept: send 200 with :protocol: webtransport.
+        // Accept: send 200. RFC 9220 does not include :protocol in the response
+        // (only in the request). Echoing it back causes RFC-compliant clients (e.g.
+        // aioquic) to reject the response because :protocol is not a valid response
+        // pseudo-header per RFC 9114 §4.3.
         Http3Headers responseHeaders = new DefaultHttp3Headers();
         responseHeaders.status("200");
-        responseHeaders.add(Http3Headers.PseudoHeaderName.PROTOCOL.value(), WT_PROTOCOL);
         ctx.writeAndFlush(new DefaultHttp3HeadersFrame(responseHeaders));
 
         // Establish the session.
