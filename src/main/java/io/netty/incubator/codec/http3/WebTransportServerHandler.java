@@ -131,7 +131,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         // Establish the session.
         QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
-        QuicChannel quicChannel = (QuicChannel) streamChannel.parent();
+        QuicChannel quicChannel = streamChannel.parent();
         long sessionId = streamChannel.streamId();
 
         WebTransportSession session = new WebTransportSession(quicChannel, streamChannel, sessionId, listener);
