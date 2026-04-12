@@ -16,7 +16,6 @@
 package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
@@ -166,7 +165,7 @@ final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandle
     }
 
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         if (cumulation != null) {
             cumulation.release();
             cumulation = null;
