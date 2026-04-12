@@ -59,7 +59,10 @@ import java.util.function.LongFunction;
  */
 public final class Http3WebTransportServerConnectionHandler extends Http3ConnectionHandler {
 
-    private final ChannelHandler requestStreamHandler;
+    // Store the acceptor and fallback so we can create a fresh (non-sharable) handler per stream.
+    private final WebTransportSessionAcceptor acceptor;
+    @Nullable
+    private final ChannelHandler fallbackRequestStreamHandler;
 
     /**
      * Creates a new instance with only a {@link WebTransportSessionAcceptor} and default settings.
@@ -95,15 +98,16 @@ public final class Http3WebTransportServerConnectionHandler extends Http3Connect
             boolean disableQpackDynamicTable) {
         super(true, inboundControlStreamHandler, unknownInboundStreamHandlerFactory,
                 localSettings, disableQpackDynamicTable, null);
-        ObjectUtil.checkNotNull(acceptor, "acceptor");
-        this.requestStreamHandler = new WebTransportServerHandler(acceptor, fallbackRequestStreamHandler);
+        this.acceptor = ObjectUtil.checkNotNull(acceptor, "acceptor");
+        this.fallbackRequestStreamHandler = fallbackRequestStreamHandler;
     }
 
     /**
-     * Returns the request stream handler used for non-WT bidirectional streams.
+     * Creates a fresh {@link WebTransportServerHandler} for non-WT bidirectional streams.
+     * A new instance is required per stream because {@link WebTransportServerHandler} is not {@code @Sharable}.
      */
-    ChannelHandler requestStreamHandler() {
-        return requestStreamHandler;
+    ChannelHandler newRequestStreamHandler() {
+        return new WebTransportServerHandler(acceptor, fallbackRequestStreamHandler);
     }
 
     /**
@@ -117,7 +121,8 @@ public final class Http3WebTransportServerConnectionHandler extends Http3Connect
         pipeline.addLast(encodeStateValidator);
         pipeline.addLast(decodeStateValidator);
         pipeline.addLast(newRequestStreamValidationHandler(streamChannel, encodeStateValidator, decodeStateValidator));
-        pipeline.addLast(requestStreamHandler);
+        // Create a fresh handler per stream — WebTransportServerHandler is not @Sharable.
+        pipeline.addLast(newRequestStreamHandler());
     }
 
     @Override

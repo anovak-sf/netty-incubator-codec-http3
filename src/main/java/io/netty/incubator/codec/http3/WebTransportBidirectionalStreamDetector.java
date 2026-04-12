@@ -83,13 +83,17 @@ final class WebTransportBidirectionalStreamDetector extends ByteToMessageDecoder
                 return;
             }
 
-            // Remove the detector — the stream's pipeline is now empty (just head/tail).
-            // The listener is responsible for adding handlers to the pipeline.
+            // Notify the listener FIRST so it can install its inbound handlers before we
+            // remove ourselves.  ByteToMessageDecoder.handlerRemoved() fires any remaining
+            // buffered bytes (e.g. the first application frame that arrived in the same
+            // packet as the WT stream header) via ctx.fireChannelRead().  At that point
+            // ctx.next still points to the first handler added by the listener, so the
+            // bytes are delivered correctly instead of being dropped on the tail.
             QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
-            ctx.pipeline().remove(this);
-
-            // Notify the listener synchronously from the event loop.
             session.listener().onBidirectionalStream(session, streamChannel);
+
+            // Remove the detector after handlers are installed.
+            ctx.pipeline().remove(this);
         } else {
             // Regular HTTP/3 request stream — install the full HTTP/3 pipeline.
             ChannelPipeline pipeline = ctx.pipeline();
