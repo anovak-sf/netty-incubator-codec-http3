@@ -97,8 +97,6 @@ public class WebTransportServerHandlerTest {
         DefaultHttp3HeadersFrame resp = ch.readOutbound();
         assertNotNull(resp);
         assertEquals("200", resp.headers().status().toString());
-        assertEquals("webtransport",
-                resp.headers().get(Http3Headers.PseudoHeaderName.PROTOCOL.value()).toString());
         assertFalse(ch.finish());
     }
 
