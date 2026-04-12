@@ -23,6 +23,8 @@ import io.netty.incubator.codec.quic.QuicChannel;
 import io.netty.incubator.codec.quic.QuicStreamChannel;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -50,6 +52,9 @@ import org.jetbrains.annotations.Nullable;
  * @see WebTransportSessionListener
  */
 public final class WebTransportServerHandler extends ChannelInboundHandlerAdapter {
+
+    private static final InternalLogger logger =
+            InternalLoggerFactory.getInstance(WebTransportServerHandler.class);
 
     private static final String WT_PROTOCOL = "webtransport";
 
@@ -93,11 +98,15 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         CharSequence method = headers.method();
         CharSequence protocol = headers.get(Http3Headers.PseudoHeaderName.PROTOCOL.value());
+        logger.debug("stream={} CONNECT received: method={} protocol={} authority={} path={} scheme={}",
+                ctx.channel(), method, protocol, headers.authority(), headers.path(), headers.scheme());
 
         boolean isWebTransportConnect = "CONNECT".equals(method == null ? "" : method.toString())
                 && WT_PROTOCOL.equals(protocol == null ? null : protocol.toString());
 
         if (!isWebTransportConnect) {
+            logger.debug("stream={} not a WT CONNECT (method={} protocol={}), routing to fallback/405",
+                    ctx.channel(), method, protocol);
             if (fallbackHandler != null) {
                 ctx.pipeline().addLast(fallbackHandler);
                 ctx.pipeline().remove(this);
@@ -110,6 +119,8 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         // Validate required pseudo-headers for WebTransport CONNECT.
         if (headers.authority() == null || headers.path() == null || headers.scheme() == null) {
+            logger.warn("stream={} WT CONNECT missing required pseudo-headers (authority={} path={} scheme={})",
+                    ctx.channel(), headers.authority(), headers.path(), headers.scheme());
             sendErrorAndClose(ctx, 400);
             return;
         }
@@ -117,6 +128,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         // Consult the acceptor.
         WebTransportSessionListener listener = acceptor.accept(headers);
         if (listener == null) {
+            logger.warn("stream={} acceptor rejected WT session", ctx.channel());
             sendErrorAndClose(ctx, 400);
             return;
         }
@@ -128,6 +140,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         Http3Headers responseHeaders = new DefaultHttp3Headers();
         responseHeaders.status("200");
         ctx.writeAndFlush(new DefaultHttp3HeadersFrame(responseHeaders));
+        logger.debug("stream={} sent 200 WT response", ctx.channel());
 
         // Establish the session.
         QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
@@ -136,6 +149,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         WebTransportSession session = new WebTransportSession(quicChannel, streamChannel, sessionId, listener);
         WebTransportSessionRegistry.getOrCreate(quicChannel).register(sessionId, session);
+        logger.debug("stream={} WT session registered with sessionId={}", ctx.channel(), sessionId);
 
         // Rewire pipeline: replace HTTP/3 frame codec with capsule codec.
         ChannelPipeline pipeline = ctx.pipeline();

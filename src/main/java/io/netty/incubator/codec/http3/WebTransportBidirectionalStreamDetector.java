@@ -16,13 +16,14 @@
 package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
-import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.incubator.codec.quic.QuicChannel;
 import io.netty.incubator.codec.quic.QuicStreamChannel;
-
-import java.util.List;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import static io.netty.incubator.codec.http3.Http3CodecUtils.numBytesForVariableLengthInteger;
 import static io.netty.incubator.codec.http3.Http3CodecUtils.readVariableLengthInteger;
@@ -34,43 +35,74 @@ import static io.netty.incubator.codec.http3.WebTransportCodecUtils.WT_STREAM_TY
  * Peeks at the first byte to determine the stream type:
  * <ul>
  *   <li>{@code 0x41} — WebTransport bidirectional stream: reads the session ID varint, finds the
- *       {@link WebTransportSession} in the {@link WebTransportSessionRegistry}, replaces itself with
- *       a pass-through, and notifies {@link WebTransportSessionListener#onBidirectionalStream}.</li>
+ *       {@link WebTransportSession} in the {@link WebTransportSessionRegistry}, installs the
+ *       listener's handlers, removes itself, then fires any remaining bytes (application data that
+ *       arrived in the same packet as the WT stream header) through the new pipeline.</li>
  *   <li>Anything else — regular HTTP/3 request stream: replaces itself with the standard HTTP/3
  *       pipeline (codec + state validators + validation handler + request stream handler).</li>
  * </ul>
+ * <p>
+ * This handler intentionally does <em>not</em> extend {@link io.netty.handler.codec.ByteToMessageDecoder}
+ * so that remaining-bytes forwarding is explicit and not dependent on
+ * {@code ByteToMessageDecoder.handlerRemoved} internals.
  */
-final class WebTransportBidirectionalStreamDetector extends ByteToMessageDecoder {
+final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandlerAdapter {
+
+    private static final InternalLogger logger =
+            InternalLoggerFactory.getInstance(WebTransportBidirectionalStreamDetector.class);
 
     private final Http3WebTransportServerConnectionHandler connectionHandler;
+    /** Accumulation buffer for bytes received before the stream type is determined. */
+    private ByteBuf cumulation;
 
     WebTransportBidirectionalStreamDetector(Http3WebTransportServerConnectionHandler connectionHandler) {
         this.connectionHandler = connectionHandler;
     }
 
     @Override
-    protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
-        if (!in.isReadable()) {
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        if (!(msg instanceof ByteBuf)) {
+            ctx.fireChannelRead(msg);
             return;
         }
 
-        byte firstByte = in.getByte(in.readerIndex());
+        ByteBuf data = (ByteBuf) msg;
+        // Append to cumulation buffer.
+        if (cumulation == null) {
+            cumulation = data;
+        } else {
+            cumulation = ctx.alloc().buffer(cumulation.readableBytes() + data.readableBytes())
+                    .writeBytes(cumulation)
+                    .writeBytes(data);
+            data.release();
+        }
+
+        if (!cumulation.isReadable()) {
+            return;
+        }
+
+        byte firstByte = cumulation.getByte(cumulation.readerIndex());
+        logger.debug("stream={} firstByte=0x{} cumulated={}b",
+                ctx.channel(), Integer.toHexString(firstByte & 0xFF), cumulation.readableBytes());
 
         if ((firstByte & 0xFF) == WT_STREAM_TYPE_BIDIRECTIONAL) {
             // Consume the 0x41 type byte.
-            in.skipBytes(1);
+            cumulation.skipBytes(1);
 
-            // Need at least one more byte for the session ID varint length.
-            if (!in.isReadable()) {
-                in.readerIndex(in.readerIndex() - 1);
+            // Wait until we have enough bytes for the session ID varint.
+            if (!cumulation.isReadable()) {
+                logger.debug("stream={} waiting for session-ID varint", ctx.channel());
                 return;
             }
-            int sidLen = numBytesForVariableLengthInteger(in.getByte(in.readerIndex()));
-            if (in.readableBytes() < sidLen) {
-                in.readerIndex(in.readerIndex() - 1);
+            int sidLen = numBytesForVariableLengthInteger(cumulation.getByte(cumulation.readerIndex()));
+            if (cumulation.readableBytes() < sidLen) {
+                logger.debug("stream={} waiting for session-ID varint ({} bytes needed, {} available)",
+                        ctx.channel(), sidLen, cumulation.readableBytes());
                 return;
             }
-            long sessionId = readVariableLengthInteger(in, sidLen);
+            long sessionId = readVariableLengthInteger(cumulation, sidLen);
+            logger.debug("stream={} detected WT bidi stream, sessionId={}, remaining={}b",
+                    ctx.channel(), sessionId, cumulation.readableBytes());
 
             // Look up the session.
             QuicChannel quicChannel = (QuicChannel) ctx.channel().parent();
@@ -78,29 +110,68 @@ final class WebTransportBidirectionalStreamDetector extends ByteToMessageDecoder
             WebTransportSession session = registry != null ? registry.find(sessionId) : null;
 
             if (session == null) {
+                logger.warn("stream={} unknown WT session ID={}, registry={}",
+                        ctx.channel(), sessionId, registry);
                 Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_ID_ERROR,
                         "WebTransport bidirectional stream references unknown session ID: " + sessionId, false);
                 return;
             }
 
-            // Notify the listener FIRST so it can install its inbound handlers before we
-            // remove ourselves.  ByteToMessageDecoder.handlerRemoved() fires any remaining
-            // buffered bytes (e.g. the first application frame that arrived in the same
-            // packet as the WT stream header) via ctx.fireChannelRead().  At that point
-            // ctx.next still points to the first handler added by the listener, so the
-            // bytes are delivered correctly instead of being dropped on the tail.
+            // Snapshot remaining bytes (application data that arrived with the WT stream header).
+            int remainingBytes = cumulation.readableBytes();
+            ByteBuf remaining = remainingBytes > 0
+                    ? cumulation.readRetainedSlice(remainingBytes)
+                    : null;
+            cumulation.release();
+            cumulation = null;
+            logger.debug("stream={} calling onBidirectionalStream, remaining={}b", ctx.channel(), remainingBytes);
+
+            // Install application handlers first, then remove ourselves so the pipeline is
+            // ready before we fire remaining bytes.
             QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
             session.listener().onBidirectionalStream(session, streamChannel);
-
-            // Remove the detector after handlers are installed.
             ctx.pipeline().remove(this);
+            logger.debug("stream={} detector removed, pipeline={}", ctx.channel(), ctx.pipeline().names());
+
+            // Forward any bytes that arrived in the same packet as the WT stream header.
+            if (remaining != null) {
+                logger.debug("stream={} firing remaining {}b to pipeline", ctx.channel(), remainingBytes);
+                ctx.fireChannelRead(remaining);
+            }
         } else {
             // Regular HTTP/3 request stream — install the full HTTP/3 pipeline.
+            // Snapshot and clear cumulation before modifying the pipeline.
+            ByteBuf remaining = cumulation;
+            cumulation = null;
+            logger.debug("stream={} detected HTTP/3 request stream, replaying {}b",
+                    ctx.channel(), remaining.readableBytes());
+
             ChannelPipeline pipeline = ctx.pipeline();
             QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
             connectionHandler.initHttp3RequestPipeline(pipeline, streamChannel);
             pipeline.remove(this);
+
+            // Replay accumulated bytes through the new HTTP/3 pipeline.
+            ctx.fireChannelRead(remaining);
         }
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        if (cumulation != null) {
+            cumulation.release();
+            cumulation = null;
+        }
+        ctx.fireChannelInactive();
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        if (cumulation != null) {
+            cumulation.release();
+            cumulation = null;
+        }
+        ctx.fireExceptionCaught(cause);
     }
 
     @Override
