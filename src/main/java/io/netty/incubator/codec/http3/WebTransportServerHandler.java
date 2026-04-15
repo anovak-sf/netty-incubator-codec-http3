@@ -154,6 +154,17 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         // Rewire pipeline: replace HTTP/3 frame codec with capsule codec.
         ChannelPipeline pipeline = ctx.pipeline();
 
+        // Remove HTTP/3 stream validators BEFORE replacing the frame codec.
+        // Http3FrameCodec extends ByteToMessageDecoder; when it is removed from the pipeline,
+        // ByteToMessageDecoder.handlerRemoved() fires any buffered decoded frames synchronously
+        // back into the pipeline via fireChannelRead().  If the validators are still present at
+        // that moment they treat those frames as unexpected and raise an Http3Exception.  Removing
+        // them first ensures the buffered frames pass through (or are released by this handler)
+        // without triggering a connection error.
+        removeIfPresent(pipeline, Http3RequestStreamEncodeStateValidator.class);
+        removeIfPresent(pipeline, Http3RequestStreamDecodeStateValidator.class);
+        removeIfPresent(pipeline, Http3RequestStreamValidationHandler.class);
+
         // The Http3FrameCodec is always in the pipeline — get it by type.
         ChannelHandler frameCodec = pipeline.get(Http3FrameCodec.class);
         if (frameCodec != null) {
@@ -162,11 +173,6 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         // Add capsule encoder at the head (outbound direction goes head→network).
         pipeline.addFirst("wtCapsuleEncoder", WebTransportCapsuleEncoder.INSTANCE);
-
-        // Remove HTTP/3 stream validators — they don't apply after session upgrade.
-        removeIfPresent(pipeline, Http3RequestStreamEncodeStateValidator.class);
-        removeIfPresent(pipeline, Http3RequestStreamDecodeStateValidator.class);
-        removeIfPresent(pipeline, Http3RequestStreamValidationHandler.class);
 
         // Replace this handler with the capsule dispatcher. The session established
         // user event will be fired from WebTransportSessionStreamHandler.handlerAdded().
