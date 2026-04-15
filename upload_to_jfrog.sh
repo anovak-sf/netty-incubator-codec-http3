@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
   set -e
 
-  BASE_VERSION=0.0.31.3.wtransport
+  BASE_VERSION=0.0.31.4.wtransport
   VERSION=${BASE_VERSION}-SNAPSHOT
   BASE=https://secfotech.jfrog.io/artifactory/sophon-power-custom-3rd-party-local
   M2_REPO=$HOME/.m2/repository/io/netty/incubator/netty-incubator-codec-http3/$VERSION
