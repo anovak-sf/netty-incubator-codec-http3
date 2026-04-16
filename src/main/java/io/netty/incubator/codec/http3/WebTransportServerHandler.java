@@ -98,14 +98,14 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         CharSequence method = headers.method();
         CharSequence protocol = headers.get(Http3Headers.PseudoHeaderName.PROTOCOL.value());
-        logger.debug("stream={} CONNECT received: method={} protocol={} authority={} path={} scheme={}",
+        logger.warn("stream={} CONNECT received: method={} protocol={} authority={} path={} scheme={}",
                 ctx.channel(), method, protocol, headers.authority(), headers.path(), headers.scheme());
 
         boolean isWebTransportConnect = "CONNECT".equals(method == null ? "" : method.toString())
                 && WT_PROTOCOL.equals(protocol == null ? null : protocol.toString());
 
         if (!isWebTransportConnect) {
-            logger.debug("stream={} not a WT CONNECT (method={} protocol={}), routing to fallback/405",
+            logger.warn("stream={} not a WT CONNECT (method={} protocol={}), routing to fallback/405",
                     ctx.channel(), method, protocol);
             if (fallbackHandler != null) {
                 ctx.pipeline().addLast(fallbackHandler);
@@ -140,7 +140,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         Http3Headers responseHeaders = new DefaultHttp3Headers();
         responseHeaders.status("200");
         ctx.writeAndFlush(new DefaultHttp3HeadersFrame(responseHeaders));
-        logger.debug("stream={} sent 200 WT response", ctx.channel());
+        logger.warn("stream={} sent 200 WT response", ctx.channel());
 
         // Establish the session.
         QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
@@ -149,11 +149,11 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         WebTransportSession session = new WebTransportSession(quicChannel, streamChannel, sessionId, listener);
         WebTransportSessionRegistry.getOrCreate(quicChannel).register(sessionId, session);
-        logger.debug("stream={} WT session registered with sessionId={}", ctx.channel(), sessionId);
+        logger.warn("stream={} WT session registered with sessionId={}", ctx.channel(), sessionId);
 
         // Rewire pipeline: replace HTTP/3 frame codec with capsule codec.
         ChannelPipeline pipeline = ctx.pipeline();
-        logger.debug("stream={} pipeline BEFORE surgery: {}", ctx.channel(), pipeline.names());
+        logger.warn("stream={} pipeline BEFORE surgery: {}", ctx.channel(), pipeline.names());
 
         // Remove HTTP/3 stream validators BEFORE replacing the frame codec.
         // Http3FrameCodec extends ByteToMessageDecoder; when it is removed from the pipeline,
@@ -170,7 +170,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         ChannelHandler frameCodec = pipeline.get(Http3FrameCodec.class);
         if (frameCodec != null) {
             pipeline.replace(frameCodec, "wtCapsuleDecoder", new WebTransportCapsuleDecoder());
-            logger.debug("stream={} Http3FrameCodec replaced with WebTransportCapsuleDecoder", ctx.channel());
+            logger.warn("stream={} Http3FrameCodec replaced with WebTransportCapsuleDecoder", ctx.channel());
         } else {
             logger.warn("stream={} Http3FrameCodec NOT FOUND in pipeline during WT surgery — pipeline: {}",
                     ctx.channel(), pipeline.names());
@@ -182,7 +182,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         // Replace this handler with the capsule dispatcher. The session established
         // user event will be fired from WebTransportSessionStreamHandler.handlerAdded().
         pipeline.replace(this, "wtSessionStream", new WebTransportSessionStreamHandler(session));
-        logger.debug("stream={} pipeline AFTER surgery: {}", ctx.channel(), pipeline.names());
+        logger.warn("stream={} pipeline AFTER surgery: {}", ctx.channel(), pipeline.names());
     }
 
     private static void removeIfPresent(ChannelPipeline pipeline, Class<? extends ChannelHandler> type) {

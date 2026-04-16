@@ -81,7 +81,7 @@ final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandle
         }
 
         byte firstByte = cumulation.getByte(cumulation.readerIndex());
-        logger.debug("stream={} firstByte=0x{} cumulated={}b",
+        logger.warn("stream={} firstByte=0x{} cumulated={}b",
                 ctx.channel(), Integer.toHexString(firstByte & 0xFF), cumulation.readableBytes());
 
         if ((firstByte & 0xFF) == WT_STREAM_TYPE_BIDIRECTIONAL) {
@@ -100,7 +100,7 @@ final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandle
                 return;
             }
             long sessionId = readVariableLengthInteger(cumulation, sidLen);
-            logger.debug("stream={} detected WT bidi stream, sessionId={}, remaining={}b",
+            logger.warn("stream={} detected WT bidi stream, sessionId={}, remaining={}b",
                     ctx.channel(), sessionId, cumulation.readableBytes());
 
             // Look up the session.
@@ -123,14 +123,14 @@ final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandle
                     : null;
             cumulation.release();
             cumulation = null;
-            logger.debug("stream={} calling onBidirectionalStream, remaining={}b", ctx.channel(), remainingBytes);
+            logger.warn("stream={} calling onBidirectionalStream, remaining={}b", ctx.channel(), remainingBytes);
 
             // Install application handlers first, then remove ourselves so the pipeline is
             // ready before we fire remaining bytes.
             QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
             session.listener().onBidirectionalStream(session, streamChannel);
             ctx.pipeline().remove(this);
-            logger.debug("stream={} detector removed, pipeline={}", ctx.channel(), ctx.pipeline().names());
+            logger.warn("stream={} detector removed, pipeline={}", ctx.channel(), ctx.pipeline().names());
 
             // Forward any bytes that arrived in the same packet as the WT stream header.
             if (remaining != null) {
