@@ -142,8 +142,11 @@ final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandle
             // Snapshot and clear cumulation before modifying the pipeline.
             ByteBuf remaining = cumulation;
             cumulation = null;
-            logger.debug("stream={} detected HTTP/3 request stream, replaying {}b",
-                    ctx.channel(), remaining.readableBytes());
+            long streamId = ((QuicStreamChannel) ctx.channel()).streamId();
+            logger.debug("stream={} (id={}) detected HTTP/3 request stream, firstByte=0x{}, replaying {}b",
+                    ctx.channel(), streamId,
+                    Integer.toHexString(firstByte & 0xFF),
+                    remaining.readableBytes());
 
             ChannelPipeline pipeline = ctx.pipeline();
             QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();

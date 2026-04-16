@@ -28,6 +28,8 @@ import io.netty.incubator.codec.quic.QuicStreamFrame;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jetbrains.annotations.Nullable;
 
 import java.net.SocketAddress;
@@ -56,6 +58,9 @@ import static io.netty.util.internal.ObjectUtil.checkPositive;
  * Decodes / encodes {@link Http3Frame}s.
  */
 final class Http3FrameCodec extends ByteToMessageDecoder implements ChannelOutboundHandler {
+    private static final InternalLogger logger =
+            InternalLoggerFactory.getInstance(Http3FrameCodec.class);
+
     private final Http3FrameTypeValidator validator;
     private final long maxHeaderListSize;
     private final QpackDecoder qpackDecoder;
@@ -171,6 +176,29 @@ final class Http3FrameCodec extends ByteToMessageDecoder implements ChannelOutbo
             long localType = readVariableLengthInteger(in, typeLen);
             if (Http3CodecUtils.isReservedHttp2FrameType(localType)) {
                 // See https://tools.ietf.org/html/draft-ietf-quic-http-32#section-7.2.8
+                // Debug: capture stream context to diagnose spurious reserved-type errors after WT pipeline surgery.
+                if (logger.isWarnEnabled()) {
+                    long streamId = ctx.channel() instanceof QuicStreamChannel
+                            ? ((QuicStreamChannel) ctx.channel()).streamId() : -1;
+                    // Peek at up to 16 bytes around the error position for diagnosis.
+                    int peekLen = Math.min(16, in.readableBytes());
+                    byte[] peek = new byte[peekLen];
+                    in.getBytes(in.readerIndex(), peek, 0, peekLen);
+                    StringBuilder hex = new StringBuilder();
+                    // Include the type byte that was already consumed + remaining bytes.
+                    hex.append(String.format("0x%02x", localType));
+                    for (byte b : peek) {
+                        hex.append(String.format(" %02x", b));
+                    }
+                    logger.warn(
+                            "Http3FrameCodec[stream={}] reserved HTTP/2 frame type 0x{} — pipeline: {} — " +
+                            "firstFrame={} cumulation bytes: [{}]",
+                            streamId,
+                            Long.toHexString(localType),
+                            ctx.pipeline().names(),
+                            firstFrame,
+                            hex);
+                }
                 connectionError(ctx, Http3ErrorCode.H3_FRAME_UNEXPECTED,
                         "Reserved type for HTTP/2 received.", true);
                 return;
