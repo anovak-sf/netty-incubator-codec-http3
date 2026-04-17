@@ -152,7 +152,7 @@ public class WebTransportBidirectionalStreamDetectorTest {
         EmbeddedQuicStreamChannel stream = newBidiStream();
 
         ByteBuf buf = Unpooled.buffer();
-        buf.writeByte(0x41); // WT_STREAM_TYPE_BIDIRECTIONAL
+        writeVariableLengthInteger(buf, 0x41L); // WT_STREAM_TYPE_BIDIRECTIONAL (as varint → 2 bytes)
         writeVariableLengthInteger(buf, sessionId);
         stream.writeInbound(buf);
 
@@ -169,7 +169,7 @@ public class WebTransportBidirectionalStreamDetectorTest {
         EmbeddedQuicStreamChannel stream = newBidiStream();
 
         ByteBuf buf = Unpooled.buffer();
-        buf.writeByte(0x41);
+        writeVariableLengthInteger(buf, 0x41L);
         writeVariableLengthInteger(buf, 9999L); // unknown session
         stream.writeInbound(buf);
 
@@ -183,9 +183,10 @@ public class WebTransportBidirectionalStreamDetectorTest {
         registerSession(0L, noopListener());
         EmbeddedQuicStreamChannel stream = newBidiStream();
 
-        // Write only the 0x41 prefix without the session ID
-        ByteBuf firstByte = Unpooled.buffer(1).writeByte(0x41);
-        assertFalse(stream.writeInbound(firstByte));
+        // Write only the 2-byte type varint without the session ID.
+        ByteBuf typeOnly = Unpooled.buffer();
+        writeVariableLengthInteger(typeOnly, 0x41L);
+        assertFalse(stream.writeInbound(typeOnly));
 
         // Detector still in pipeline (waiting)
         assertNotNull(stream.pipeline().get(WebTransportBidirectionalStreamDetector.class));
@@ -231,7 +232,7 @@ public class WebTransportBidirectionalStreamDetectorTest {
         EmbeddedQuicStreamChannel stream = newBidiStream();
 
         ByteBuf buf = Unpooled.buffer();
-        buf.writeByte(0x41);
+        writeVariableLengthInteger(buf, 0x41L);
         writeVariableLengthInteger(buf, sessionId);
         stream.writeInbound(buf);
 

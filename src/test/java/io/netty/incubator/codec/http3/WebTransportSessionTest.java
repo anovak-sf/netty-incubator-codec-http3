@@ -80,12 +80,14 @@ public class WebTransportSessionTest {
                 new ChannelHandlerAdapter() { }).get();
         assertNotNull(newStream);
 
-        // The prefix handler writes [0x41][sessionId varint] on channelActive
+        // The prefix handler writes [streamType(varint)][sessionId(varint)] on channelActive.
         ByteBuf prefix = ((EmbeddedQuicStreamChannel) newStream).readOutbound();
         assertNotNull(prefix);
 
-        // First byte: 0x41
-        assertEquals(WT_STREAM_TYPE_BIDIRECTIONAL, prefix.readByte() & 0xFF);
+        // Stream type varint: 0x41 (bidi) — 2 bytes on the wire.
+        int typeLen = numBytesForVariableLengthInteger(prefix.getByte(prefix.readerIndex()));
+        long typeRead = readVariableLengthInteger(prefix, typeLen);
+        assertEquals(WT_STREAM_TYPE_BIDIRECTIONAL, (int) typeRead);
 
         // Session ID varint
         int sidLen = numBytesForVariableLengthInteger(prefix.getByte(prefix.readerIndex()));
@@ -105,8 +107,10 @@ public class WebTransportSessionTest {
         ByteBuf prefix = ((EmbeddedQuicStreamChannel) newStream).readOutbound();
         assertNotNull(prefix);
 
-        // First byte: 0x54
-        assertEquals(WT_STREAM_TYPE_UNIDIRECTIONAL, prefix.readByte() & 0xFF);
+        // Stream type varint: 0x54 (uni) — 2 bytes on the wire.
+        int typeLen = numBytesForVariableLengthInteger(prefix.getByte(prefix.readerIndex()));
+        long typeRead = readVariableLengthInteger(prefix, typeLen);
+        assertEquals(WT_STREAM_TYPE_UNIDIRECTIONAL, (int) typeRead);
 
         // Session ID varint
         int sidLen = numBytesForVariableLengthInteger(prefix.getByte(prefix.readerIndex()));

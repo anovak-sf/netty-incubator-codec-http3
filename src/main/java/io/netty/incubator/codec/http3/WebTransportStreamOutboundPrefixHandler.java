@@ -25,10 +25,10 @@ import static io.netty.incubator.codec.http3.Http3CodecUtils.writeVariableLength
 /**
  * One-shot handler that writes the WebTransport stream prefix on channel activation.
  * <p>
- * For bidirectional WT streams the prefix is {@code [0x41][sessionId(varint)]}.
- * For unidirectional WT streams the prefix is the stream type {@code 0x54} followed by
- * {@code [sessionId(varint)]} (the stream type itself is written by {@link WebTransportSession}
- * when creating the QUIC stream; this handler writes the session ID).
+ * Per draft-ietf-webtrans-http3 §4.1 the prefix is two QUIC variable-length integers:
+ * {@code [streamType(varint)][sessionId(varint)]}. The stream type is {@code 0x41} for
+ * bidirectional streams and {@code 0x54} for unidirectional streams. Both values exceed the 1-byte
+ * varint range (0..63) and are therefore encoded as 2-byte varints on the wire.
  * <p>
  * After writing the prefix the handler removes itself from the pipeline, leaving the user's
  * handler to process raw bytes.
@@ -41,9 +41,9 @@ final class WebTransportStreamOutboundPrefixHandler extends ChannelInboundHandle
     /**
      * Creates a new prefix handler.
      *
-     * @param streamTypeByte the first byte to write ({@code 0x41} for bidirectional,
+     * @param streamTypeByte the stream type varint value to write ({@code 0x41} for bidirectional,
      *                       {@code 0x54} for unidirectional WT streams)
-     * @param sessionId      the WebTransport session ID to encode as a varint after the type byte
+     * @param sessionId      the WebTransport session ID to encode as a varint after the type varint
      */
     WebTransportStreamOutboundPrefixHandler(int streamTypeByte, long sessionId) {
         this.streamTypeByte = streamTypeByte;
@@ -52,9 +52,13 @@ final class WebTransportStreamOutboundPrefixHandler extends ChannelInboundHandle
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        // Allocate a buffer for the stream prefix: 1 byte type + up to 8 bytes session ID varint.
-        ByteBuf prefix = ctx.alloc().buffer(1 + numBytesForVariableLengthInteger(sessionId));
-        prefix.writeByte(streamTypeByte);
+        // The WebTransport stream signal is a QUIC variable-length integer
+        // (draft-ietf-webtrans-http3 §4.1). Values 0x41 (bidi) and 0x54 (uni) both exceed the 1-byte
+        // varint range (0..63) and must be encoded as 2-byte varints on the wire.
+        int typeVarintLen = numBytesForVariableLengthInteger(streamTypeByte);
+        int sidVarintLen = numBytesForVariableLengthInteger(sessionId);
+        ByteBuf prefix = ctx.alloc().buffer(typeVarintLen + sidVarintLen);
+        writeVariableLengthInteger(prefix, streamTypeByte);
         writeVariableLengthInteger(prefix, sessionId);
         ctx.writeAndFlush(prefix);
 

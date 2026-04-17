@@ -80,23 +80,33 @@ final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandle
             return;
         }
 
-        byte firstByte = cumulation.getByte(cumulation.readerIndex());
-        logger.warn("stream={} firstByte=0x{} cumulated={}b",
-                ctx.channel(), Integer.toHexString(firstByte & 0xFF), cumulation.readableBytes());
+        // The WebTransport stream signal is a QUIC variable-length integer (draft-ietf-webtrans-http3
+        // §4.1). The bidi signal value is 0x41 (65), which exceeds the 1-byte varint range (0..63) and
+        // therefore encodes as two bytes on the wire: 0x40 0x41. Read it as a varint.
+        int typeVarintLen = numBytesForVariableLengthInteger(cumulation.getByte(cumulation.readerIndex()));
+        if (cumulation.readableBytes() < typeVarintLen) {
+            logger.debug("stream={} waiting for stream-type varint ({} bytes needed, {} available)",
+                    ctx.channel(), typeVarintLen, cumulation.readableBytes());
+            return;
+        }
+        int typeStartIndex = cumulation.readerIndex();
+        long streamType = readVariableLengthInteger(cumulation, typeVarintLen);
+        logger.warn("stream={} streamType=0x{} (varintLen={}b) cumulated={}b",
+                ctx.channel(), Long.toHexString(streamType), typeVarintLen,
+                cumulation.readableBytes() + typeVarintLen);
 
-        if ((firstByte & 0xFF) == WT_STREAM_TYPE_BIDIRECTIONAL) {
-            // Consume the 0x41 type byte.
-            cumulation.skipBytes(1);
-
+        if (streamType == WT_STREAM_TYPE_BIDIRECTIONAL) {
             // Wait until we have enough bytes for the session ID varint.
             if (!cumulation.isReadable()) {
                 logger.debug("stream={} waiting for session-ID varint", ctx.channel());
+                cumulation.readerIndex(typeStartIndex);
                 return;
             }
             int sidLen = numBytesForVariableLengthInteger(cumulation.getByte(cumulation.readerIndex()));
             if (cumulation.readableBytes() < sidLen) {
                 logger.debug("stream={} waiting for session-ID varint ({} bytes needed, {} available)",
                         ctx.channel(), sidLen, cumulation.readableBytes());
+                cumulation.readerIndex(typeStartIndex);
                 return;
             }
             long sessionId = readVariableLengthInteger(cumulation, sidLen);
@@ -139,13 +149,14 @@ final class WebTransportBidirectionalStreamDetector extends ChannelInboundHandle
             }
         } else {
             // Regular HTTP/3 request stream — install the full HTTP/3 pipeline.
-            // Snapshot and clear cumulation before modifying the pipeline.
+            // Rewind so the HTTP/3 codec re-reads the stream-type varint as its first frame type.
+            cumulation.readerIndex(typeStartIndex);
             ByteBuf remaining = cumulation;
             cumulation = null;
             long streamId = ((QuicStreamChannel) ctx.channel()).streamId();
-            logger.debug("stream={} (id={}) detected HTTP/3 request stream, firstByte=0x{}, replaying {}b",
+            logger.debug("stream={} (id={}) detected HTTP/3 request stream, streamType=0x{}, replaying {}b",
                     ctx.channel(), streamId,
-                    Integer.toHexString(firstByte & 0xFF),
+                    Long.toHexString(streamType),
                     remaining.readableBytes());
 
             ChannelPipeline pipeline = ctx.pipeline();
