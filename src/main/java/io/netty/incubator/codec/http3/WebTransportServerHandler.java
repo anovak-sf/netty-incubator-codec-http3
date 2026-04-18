@@ -98,15 +98,11 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         CharSequence method = headers.method();
         CharSequence protocol = headers.get(Http3Headers.PseudoHeaderName.PROTOCOL.value());
-        logger.warn("stream={} CONNECT received: method={} protocol={} authority={} path={} scheme={}",
-                ctx.channel(), method, protocol, headers.authority(), headers.path(), headers.scheme());
 
         boolean isWebTransportConnect = "CONNECT".equals(method == null ? "" : method.toString())
                 && WT_PROTOCOL.equals(protocol == null ? null : protocol.toString());
 
         if (!isWebTransportConnect) {
-            logger.warn("stream={} not a WT CONNECT (method={} protocol={}), routing to fallback/405",
-                    ctx.channel(), method, protocol);
             if (fallbackHandler != null) {
                 ctx.pipeline().addLast(fallbackHandler);
                 ctx.pipeline().remove(this);
@@ -119,7 +115,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         // Validate required pseudo-headers for WebTransport CONNECT.
         if (headers.authority() == null || headers.path() == null || headers.scheme() == null) {
-            logger.warn("stream={} WT CONNECT missing required pseudo-headers (authority={} path={} scheme={})",
+            logger.debug("stream={} WT CONNECT missing required pseudo-headers (authority={} path={} scheme={})",
                     ctx.channel(), headers.authority(), headers.path(), headers.scheme());
             sendErrorAndClose(ctx, 400);
             return;
@@ -128,7 +124,7 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         // Consult the acceptor.
         WebTransportSessionListener listener = acceptor.accept(headers);
         if (listener == null) {
-            logger.warn("stream={} acceptor rejected WT session", ctx.channel());
+            logger.debug("stream={} acceptor rejected WT session", ctx.channel());
             sendErrorAndClose(ctx, 400);
             return;
         }
@@ -140,7 +136,6 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         Http3Headers responseHeaders = new DefaultHttp3Headers();
         responseHeaders.status("200");
         ctx.writeAndFlush(new DefaultHttp3HeadersFrame(responseHeaders));
-        logger.warn("stream={} sent 200 WT response", ctx.channel());
 
         // Establish the session.
         QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
@@ -149,11 +144,9 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
         WebTransportSession session = new WebTransportSession(quicChannel, streamChannel, sessionId, listener);
         WebTransportSessionRegistry.getOrCreate(quicChannel).register(sessionId, session);
-        logger.warn("stream={} WT session registered with sessionId={}", ctx.channel(), sessionId);
 
         // Rewire pipeline: replace HTTP/3 frame codec with capsule codec.
         ChannelPipeline pipeline = ctx.pipeline();
-        logger.warn("stream={} pipeline BEFORE surgery: {}", ctx.channel(), pipeline.names());
 
         // Remove HTTP/3 stream validators BEFORE replacing the frame codec.
         // Http3FrameCodec extends ByteToMessageDecoder; when it is removed from the pipeline,
@@ -170,9 +163,8 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         ChannelHandler frameCodec = pipeline.get(Http3FrameCodec.class);
         if (frameCodec != null) {
             pipeline.replace(frameCodec, "wtCapsuleDecoder", new WebTransportCapsuleDecoder());
-            logger.warn("stream={} Http3FrameCodec replaced with WebTransportCapsuleDecoder", ctx.channel());
         } else {
-            logger.warn("stream={} Http3FrameCodec NOT FOUND in pipeline during WT surgery — pipeline: {}",
+            logger.debug("stream={} Http3FrameCodec NOT FOUND in pipeline during WT surgery — pipeline: {}",
                     ctx.channel(), pipeline.names());
         }
 
@@ -182,7 +174,6 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         // Replace this handler with the capsule dispatcher. The session established
         // user event will be fired from WebTransportSessionStreamHandler.handlerAdded().
         pipeline.replace(this, "wtSessionStream", new WebTransportSessionStreamHandler(session));
-        logger.warn("stream={} pipeline AFTER surgery: {}", ctx.channel(), pipeline.names());
     }
 
     private static void removeIfPresent(ChannelPipeline pipeline, Class<? extends ChannelHandler> type) {
