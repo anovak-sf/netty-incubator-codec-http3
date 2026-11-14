@@ -1,21 +1,50 @@
-![Build project](https://github.com/netty/netty-incubator-codec-http3/workflows/Build%20project/badge.svg)
-
 # netty-incubator-codec-http3
-Experimental HTTP3 codec on top of our own [QUIC codec](https://github.com/netty/netty-incubator-codec-quic).
+HTTP/3 and WebTransport fork using the maintained [Netty 4.2 QUIC codec](https://netty.io/4.2/api/io/netty/handler/codec/quic/package-summary.html).
+
+The HTTP/3 implementation and regression tests incorporate the changes from
+[Netty 4.2.17.Final](https://github.com/netty/netty/tree/netty-4.2.17.Final/codec-http3),
+merged against this fork's upstream baseline `78b7bea`, while retaining the custom
+WebTransport implementation and its fixes. The artifact is
+`io.netty.incubator:netty-incubator-codec-http3:0.0.33.0.wtransport-netty42-SNAPSHOT`.
+
+The HTTP/3 package remains `io.netty.incubator.codec.http3`. Applications must update QUIC
+imports to `io.netty.handler.codec.quic` and align their unshaded Netty dependencies to
+**4.2.17.Final**, including the matching native QUIC artifacts. Use `io.netty:netty-bom`
+for version alignment. Upstream defaults now limit header field sections to 8 KiB and
+buffered unknown frame payloads to 32 KiB; configure larger limits explicitly when required.
+The minimum Java version remains 8. This dependency migration does not implement draft-16.
 
 ## How Can I use it ?
 
 For some example usage please checkout our
-[server example](https://github.com/netty/netty-incubator-codec-http3/blob/main/src/test/java/io/netty/incubator/codec/http3/example/Http3ServerExample.java) and
-[client example](https://github.com/netty/netty-incubator-codec-http3/blob/main/src/test/java/io/netty/incubator/codec/http3/example/Http3ClientExample.java).
+[server example](src/test/java/io/netty/incubator/codec/http3/example/Http3ServerExample.java) and
+[client example](src/test/java/io/netty/incubator/codec/http3/example/Http3ClientExample.java).
 
 WebTransport support was built using Claude. It read webtransport spec and created initial version. After some iterations, webtransport server works with an application in Chrome.
+
+This implementation uses the legacy `:protocol=webtransport` and
+`SETTINGS_ENABLE_WEBTRANSPORT=0x2b603742` wire format. It is **not an implementation of
+[WebTransport over HTTP/3 draft-16](https://www.ietf.org/archive/id/draft-ietf-webtrans-http3-16.html)**,
+which uses different negotiation and requires reliable stream resets. Multiplexing sessions
+also requires session flow control.
+Do not advertise a newer draft's settings without implementing its remaining requirements.
+See [draft-16 prerequisites and Chrome compatibility](docs/webtransport-draft16.md) for the
+QUIC dependency changes needed for an upgrade and an optional browser interoperability test.
+
+Capsules on the CONNECT stream are carried inside HTTP/3 DATA frames, as required by
+[RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.1).
+`WebTransportSession.sendDatagram()` sends native QUIC datagrams; both endpoints must configure
+QUIC datagram support. The session acceptor must validate any `Origin` header against the
+application's allowed origins before accepting a browser session. Session listeners receive
+`onSessionDraining()` when the peer asks them to finish using the session.
+
+Streams and datagrams arriving before their CONNECT request are buffered with count and byte
+limits. A native QUIC stream that closes before its CONNECT arrives cannot be replayed later;
+such pending stream data is released when the channel closes.
 
 The biggest pain point is that Chrome requires certificates signed by public CAs, imported CAs are ignored. They work with some developer settings, though.
 
 So the way to have a working application is that you must implement certificate pinning. In that case, certificate can be even self signed, but it cannot have longer validity than 14 days.
-
-Another thing to note is, that server must disable dynamic qpack table. Some bytes are going to the connect stream, while they should go to my bidirectional streams.
 
 Finally, length prefixed messages are used in this example, you need to have corresponding decoding/coding on browser side.
 
@@ -43,12 +72,7 @@ Finally, length prefixed messages are used in this example, you need to have cor
                                 null,
                                 null,
                                 settings,
-                                true, // disableQpackDynamicTable: Chrome uses QPACK dynamic table which causes
-                                      // QPACK blocking — the HEADERS frame is held waiting for dynamic table
-                                      // updates, so pipeline surgery never completes. Meanwhile Chrome sends
-                                      // capsule data on the CONNECT stream, which Http3FrameCodec reads as a
-                                      // reserved HTTP/2 frame type (0x08). Setting this to true forces
-                                      // QPACK_MAX_TABLE_CAPACITY=0 so Chrome falls back to static table only.
+                                true, // disableQpackDynamicTable: use static QPACK tables in this example.
                             )
                         )
                     }
