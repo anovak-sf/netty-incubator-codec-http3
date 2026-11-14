@@ -85,14 +85,25 @@ abstract class Http3UnidirectionalStreamInboundHandler extends ByteToMessageDeco
         if (in.readableBytes() < len) {
             return;
         }
+        int typeStart = in.readerIndex();
         long type = Http3CodecUtils.readVariableLengthInteger(in, len);
+        // Stream types are 62-bit varints. Do not truncate unknown types into a known type.
+        if (type > Integer.MAX_VALUE) {
+            initUnknownStream(ctx, type);
+            return;
+        }
         switch ((int) type) {
             case HTTP3_CONTROL_STREAM_TYPE:
                 initControlStream(ctx);
                 break;
             case HTTP3_PUSH_STREAM_TYPE:
+                if (!in.isReadable()) {
+                    in.readerIndex(typeStart);
+                    return;
+                }
                 int pushIdLen = Http3CodecUtils.numBytesForVariableLengthInteger(in.getByte(in.readerIndex()));
                 if (in.readableBytes() < pushIdLen) {
+                    in.readerIndex(typeStart);
                     return;
                 }
                 long pushId = Http3CodecUtils.readVariableLengthInteger(in, pushIdLen);
@@ -109,8 +120,17 @@ abstract class Http3UnidirectionalStreamInboundHandler extends ByteToMessageDeco
             case WT_STREAM_TYPE_UNIDIRECTIONAL:
                 // WebTransport unidirectional stream — read the session ID varint.
                 // See https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/
+                if (!supportsWebTransport()) {
+                    initUnknownStream(ctx, type);
+                    return;
+                }
+                if (!in.isReadable()) {
+                    in.readerIndex(typeStart);
+                    return;
+                }
                 int sessionIdLen = Http3CodecUtils.numBytesForVariableLengthInteger(in.getByte(in.readerIndex()));
                 if (in.readableBytes() < sessionIdLen) {
+                    in.readerIndex(typeStart);
                     return;
                 }
                 long sessionId = Http3CodecUtils.readVariableLengthInteger(in, sessionIdLen);
@@ -151,22 +171,13 @@ abstract class Http3UnidirectionalStreamInboundHandler extends ByteToMessageDeco
      */
     abstract void initPushStream(ChannelHandlerContext ctx, long id);
 
-    /**
-     * Called if the current {@link Channel} is a WebTransport unidirectional stream
-     * (stream type {@code 0x54}).
-     * <p>
-     * The session ID has already been read from the stream. Implementations should look up the
-     * session in the {@link WebTransportSessionRegistry} and route accordingly. If the session is
-     * unknown, close the connection with {@link Http3ErrorCode#H3_ID_ERROR}.
-     *
-     * @param ctx       the channel handler context
-     * @param sessionId the WebTransport session ID encoded in the stream prefix
-     */
+    boolean supportsWebTransport() {
+        return false;
+    }
+
+    /** Routes a WebTransport stream after its complete prefix has been read. */
     void initWebTransportUnidirectionalStream(ChannelHandlerContext ctx, long sessionId) {
-        // Default: treat as unknown — close with H3_ID_ERROR if no override.
-        Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_ID_ERROR,
-                "Received WebTransport unidirectional stream with session ID " + sessionId
-                        + " but WebTransport is not enabled.", false);
+        WebTransportSessionRegistry.initStream(ctx, sessionId, false);
     }
 
     /**

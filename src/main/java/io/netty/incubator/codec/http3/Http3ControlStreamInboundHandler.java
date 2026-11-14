@@ -20,9 +20,9 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -37,8 +37,6 @@ import static io.netty.incubator.codec.http3.Http3ErrorCode.H3_FRAME_UNEXPECTED;
 import static io.netty.incubator.codec.http3.Http3ErrorCode.H3_ID_ERROR;
 import static io.netty.incubator.codec.http3.Http3ErrorCode.H3_MISSING_SETTINGS;
 import static io.netty.incubator.codec.http3.Http3ErrorCode.QPACK_ENCODER_STREAM_ERROR;
-import static io.netty.incubator.codec.http3.Http3SettingsFrame.HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS;
-import static io.netty.incubator.codec.http3.Http3SettingsFrame.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY;
 import static io.netty.incubator.codec.http3.QpackUtil.toIntOrThrow;
 import static io.netty.util.internal.ThrowableUtil.unknownStackTrace;
 
@@ -111,6 +109,13 @@ final class Http3ControlStreamInboundHandler extends Http3FrameTypeInboundValida
         final boolean valid;
         if (isSettingsFrame) {
             valid = handleHttp3SettingsFrame(ctx, (Http3SettingsFrame) frame);
+            if (valid) {
+                Http3ConnectionHandler connectionHandler = ctx.channel().parent().pipeline()
+                        .get(Http3ConnectionHandler.class);
+                if (connectionHandler != null) {
+                    connectionHandler.peerSettingsReceived((Http3SettingsFrame) frame);
+                }
+            }
         } else if (frame instanceof Http3GoAwayFrame) {
             valid = handleHttp3GoAwayFrame(ctx, (Http3GoAwayFrame) frame);
         } else if (frame instanceof Http3MaxPushIdFrame) {
@@ -150,8 +155,20 @@ final class Http3ControlStreamInboundHandler extends Http3FrameTypeInboundValida
         }
         quicChannel.createStream(QuicStreamType.UNIDIRECTIONAL,
                 new QPackEncoderStreamInitializer(qpackEncoder, qpackAttributes,
-                        settingsFrame.getOrDefault(HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0),
-                        settingsFrame.getOrDefault(HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS, 0)))
+                        settingsFrame
+                                .settings()
+                                .getOrDefault(
+                                        Http3SettingIdentifier.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY.id(),
+                                        0L
+                                ),
+                        settingsFrame
+                                .settings()
+                                .getOrDefault(
+                                        Http3SettingIdentifier.HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS.id(),
+                                        0L
+                                )
+                        )
+                )
                 .addListener(closeOnFailure);
         quicChannel.createStream(QuicStreamType.UNIDIRECTIONAL, new QPackDecoderStreamInitializer(qpackAttributes))
                 .addListener(closeOnFailure);

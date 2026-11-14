@@ -18,7 +18,7 @@ package io.netty.incubator.codec.http3;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -61,7 +61,7 @@ public class Http3ControlStreamInboundHandlerTest extends
     @Override
     protected void setUp(boolean server) {
         super.setUp(server);
-        qpackEncoder = new QpackEncoder();
+        qpackEncoder = new QpackEncoder(QpackSensitivityDetector.NEVER_SENSITIVE);
         remoteControlStreamHandler = new Http3ControlStreamOutboundHandler(server, new DefaultHttp3SettingsFrame(),
                 new ChannelInboundHandlerAdapter());
     }

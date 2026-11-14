@@ -31,15 +31,14 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.LinkedBlockingQueue;
 
 import static io.netty.buffer.UnpooledByteBufAllocator.DEFAULT;
-import static io.netty.incubator.codec.http3.Http3SettingsFrame.HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS;
-import static io.netty.incubator.codec.http3.Http3SettingsFrame.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY;
-import static io.netty.incubator.codec.quic.QuicStreamType.UNIDIRECTIONAL;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static io.netty.incubator.codec.http3.Http3SettingIdentifier.HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS;
+import static io.netty.incubator.codec.http3.Http3SettingIdentifier.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY;
+import static io.netty.handler.codec.quic.QuicStreamType.UNIDIRECTIONAL;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -54,6 +53,7 @@ public class QpackEncoderDecoderTest {
     private QpackEncoderDynamicTable encDynamicTable;
     private QpackDecoderDynamicTable decDynamicTable;
     private BlockingQueue<Callable<Void>> suspendedEncoderInstructions;
+    private QpackSensitivityDetector sensitivityDetector = QpackSensitivityDetector.NEVER_SENSITIVE;
 
     private final QpackDecoderStateSyncStrategy syncStrategy = mock(QpackDecoderStateSyncStrategy.class);
     private final Http3Headers encHeaders = new DefaultHttp3Headers();
@@ -134,8 +134,8 @@ public class QpackEncoderDecoderTest {
         verifyRequiredInsertCount(3);
         verifyKnownReceivedCount(3);
         decode(out, decHeaders);
-        assertEquals(3, decDynamicTable.insertCount());
-        assertEquals(3, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(3));
+        assertThat(decHeaders.size(), is(3));
         verifyDecodedHeaders("foo", "bar", 3);
 
         resetState();
@@ -144,8 +144,8 @@ public class QpackEncoderDecoderTest {
         verifyRequiredInsertCount(6);
         verifyKnownReceivedCount(6);
         decode(out, decHeaders);
-        assertEquals(6, decDynamicTable.insertCount());
-        assertEquals(3, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(6));
+        assertThat(decHeaders.size(), is(3));
         verifyDecodedHeaders("boo", "far", 3);
 
         resetState();
@@ -155,22 +155,24 @@ public class QpackEncoderDecoderTest {
         verifyKnownReceivedCount(9);
 
         decode(out, decHeaders);
-        assertEquals(9, decDynamicTable.insertCount());
-        assertEquals(3, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(9));
+        assertThat(decHeaders.size(), is(3));
         verifyDecodedHeaders("zoo", "gar", 3);
 
         // Now reuse the headers for encode to use dynamic table.
         resetState();
-        assertThat(encDynamicTable.getEntryIndex("zoo1", "gar")).isGreaterThanOrEqualTo(0);
-        assertThat(encDynamicTable.getEntryIndex("zoo2", "gar")).isGreaterThanOrEqualTo(0);
+        assertThat("Header not found in encoder dynamic table.",
+                encDynamicTable.getEntryIndex("zoo1", "gar"), greaterThanOrEqualTo(0));
+        assertThat("Header not found in encoder dynamic table.",
+                encDynamicTable.getEntryIndex("zoo2", "gar"), greaterThanOrEqualTo(0));
         encHeaders.add("zoo1", "gar");
         encHeaders.add("zoo2", "gar");
         encode(out, encHeaders);
         verifyRequiredInsertCount(9); // No new inserts
         verifyKnownReceivedCount(9); // No new inserts
         decode(out, decHeaders);
-        assertEquals(9, decDynamicTable.insertCount());
-        assertEquals(2, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(9));
+        assertThat(decHeaders.size(), is(2));
         verifyDecodedHeader("zoo1", "gar");
         verifyDecodedHeader("zoo2", "gar");
     }
@@ -183,14 +185,14 @@ public class QpackEncoderDecoderTest {
         encode(out, encHeaders);
         verifyRequiredInsertCount(3);
         verifyKnownReceivedCount(0);
-        assertEquals(0, decDynamicTable.insertCount());
+        assertThat(decDynamicTable.insertCount(), is(0));
 
         drainNextSuspendedEncoderInstruction();
         decode(out, decHeaders);
         drainAllSuspendedEncoderInstructions();
-        assertEquals(3, decDynamicTable.insertCount());
+        assertThat(decDynamicTable.insertCount(), is(3));
         verifyKnownReceivedCount(3);
-        assertEquals(3, decHeaders.size());
+        assertThat(decHeaders.size(), is(3));
         verifyDecodedHeaders("foo", "bar", 3);
 
         resetState();
@@ -201,9 +203,9 @@ public class QpackEncoderDecoderTest {
 
         decode(out, decHeaders);
         drainAllSuspendedEncoderInstructions();
-        assertEquals(6, decDynamicTable.insertCount());
+        assertThat(decDynamicTable.insertCount(), is(6));
         verifyKnownReceivedCount(6);
-        assertEquals(3, decHeaders.size());
+        assertThat(decHeaders.size(), is(3));
         verifyDecodedHeaders("boo", "far", 3);
 
         resetState();
@@ -215,22 +217,24 @@ public class QpackEncoderDecoderTest {
         decode(out, decHeaders);
         drainAllSuspendedEncoderInstructions();
         verifyKnownReceivedCount(9);
-        assertEquals(9, decDynamicTable.insertCount());
-        assertEquals(3, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(9));
+        assertThat(decHeaders.size(), is(3));
         verifyDecodedHeaders("zoo", "gar", 3);
 
         // Now reuse the headers for encode to use dynamic table.
         resetState();
-        assertThat(encDynamicTable.getEntryIndex("zoo1", "gar")).isGreaterThanOrEqualTo(0);
-        assertThat(encDynamicTable.getEntryIndex("zoo2", "gar")).isGreaterThanOrEqualTo(0);
+        assertThat("Header not found in encoder dynamic table.",
+                encDynamicTable.getEntryIndex("zoo1", "gar"), greaterThanOrEqualTo(0));
+        assertThat("Header not found in encoder dynamic table.",
+                encDynamicTable.getEntryIndex("zoo2", "gar"), greaterThanOrEqualTo(0));
         encHeaders.add("zoo1", "gar");
         encHeaders.add("zoo2", "gar");
         encode(out, encHeaders);
         verifyRequiredInsertCount(9); // No new inserts
         verifyKnownReceivedCount(9); // No new inserts
         decode(out, decHeaders);
-        assertEquals(9, decDynamicTable.insertCount());
-        assertEquals(2, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(9));
+        assertThat(decHeaders.size(), is(2));
         verifyDecodedHeader("zoo1", "gar");
         verifyDecodedHeader("zoo2", "gar");
     }
@@ -244,7 +248,7 @@ public class QpackEncoderDecoderTest {
 
         addEncodeHeader("foo", "bar", 5);
         QpackHeaderField oldEntry = new QpackHeaderField("foo0", "bar");
-        assertNotNull(encHeaders.get(oldEntry.name, oldEntry.value));
+        assertThat(encHeaders.get(oldEntry.name, oldEntry.value), is(notNullValue()));
 
         ByteBuf spareEncode = Unpooled.buffer();
         try {
@@ -256,8 +260,8 @@ public class QpackEncoderDecoderTest {
         verifyKnownReceivedCount(0);
 
         final int idx = encDynamicTable.getEntryIndex(oldEntry.name, oldEntry.value);
-        assertThat(idx).isGreaterThanOrEqualTo(0);
-        assertTrue(encDynamicTable.requiresDuplication(idx, oldEntry.size()));
+        assertThat(idx, greaterThanOrEqualTo(0));
+        assertThat(encDynamicTable.requiresDuplication(idx, oldEntry.size()), is(true));
 
         resetState();
         stateSyncStrategyAckNextInsert = true;
@@ -268,8 +272,8 @@ public class QpackEncoderDecoderTest {
         decode(out, decHeaders);
         verifyKnownReceivedCount(6);
 
-        assertEquals(6, decDynamicTable.insertCount());
-        assertEquals(1, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(6));
+        assertThat(decHeaders.size(), is(1));
         verifyDecodedHeader(oldEntry.name, oldEntry.value);
 
         // Now encode again to refer to the duplicated entry
@@ -281,8 +285,8 @@ public class QpackEncoderDecoderTest {
         decode(out, decHeaders);
         verifyKnownReceivedCount(6);
 
-        assertEquals(6, decDynamicTable.insertCount());
-        assertEquals(1, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(6));
+        assertThat(decHeaders.size(), is(1));
         verifyDecodedHeader(oldEntry.name, oldEntry.value);
     }
 
@@ -295,7 +299,7 @@ public class QpackEncoderDecoderTest {
 
         addEncodeHeader("foo", "bar", 5);
         QpackHeaderField oldEntry = new QpackHeaderField("foo0", "bar");
-        assertNotNull(encHeaders.get(oldEntry.name, oldEntry.value));
+        assertThat(encHeaders.get(oldEntry.name, oldEntry.value), is(notNullValue()));
 
         ByteBuf spareEncode = Unpooled.buffer();
         try {
@@ -307,8 +311,8 @@ public class QpackEncoderDecoderTest {
         verifyKnownReceivedCount(0);
 
         final int idx = encDynamicTable.getEntryIndex(oldEntry.name, oldEntry.value);
-        assertThat(idx).isGreaterThanOrEqualTo(0);
-        assertTrue(encDynamicTable.requiresDuplication(idx, oldEntry.size()));
+        assertThat(idx, greaterThanOrEqualTo(0));
+        assertThat(encDynamicTable.requiresDuplication(idx, oldEntry.size()), is(true));
 
         resetState();
         stateSyncStrategyAckNextInsert = true;
@@ -319,13 +323,13 @@ public class QpackEncoderDecoderTest {
 
         drainNextSuspendedEncoderInstruction();
         decode(out, decHeaders);
-        assertEquals(0, decDynamicTable.insertCount());
+        assertThat(decDynamicTable.insertCount(), is(0));
         verifyKnownReceivedCount(0);
 
         drainAllSuspendedEncoderInstructions();
-        assertEquals(6, decDynamicTable.insertCount());
+        assertThat(decDynamicTable.insertCount(), is(6));
         verifyKnownReceivedCount(6);
-        assertEquals(1, decHeaders.size());
+        assertThat(decHeaders.size(), is(1));
         verifyDecodedHeader(oldEntry.name, oldEntry.value);
     }
 
@@ -336,8 +340,8 @@ public class QpackEncoderDecoderTest {
         verifyKnownReceivedCount(headersAdded);
 
         decode(out, decHeaders);
-        assertEquals(headersAdded, decDynamicTable.insertCount());
-        assertEquals(1, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(headersAdded));
+        assertThat(decHeaders.size(), is(1));
         verifyDecodedHeader(name, value);
 
         // Encode again to refer to dynamic table
@@ -349,8 +353,8 @@ public class QpackEncoderDecoderTest {
         verifyKnownReceivedCount(headersAdded);
 
         decode(out, decHeaders);
-        assertEquals(headersAdded, decDynamicTable.insertCount());
-        assertEquals(1, decHeaders.size());
+        assertThat(decDynamicTable.insertCount(), is(headersAdded));
+        assertThat(decHeaders.size(), is(1));
         verifyDecodedHeader(name, value);
     }
 
@@ -360,16 +364,16 @@ public class QpackEncoderDecoderTest {
         verifyRequiredInsertCount(headersAdded);
 
         verifyKnownReceivedCount(headersAdded - 1);
-        assertEquals(headersAdded - 1, decDynamicTable.insertCount());
+        assertThat(decDynamicTable.insertCount(), is(headersAdded - 1));
 
         drainNextSuspendedEncoderInstruction();
 
         decode(out, decHeaders);
         drainAllSuspendedEncoderInstructions();
-        assertEquals(headersAdded, decDynamicTable.insertCount());
+        assertThat(decDynamicTable.insertCount(), is(headersAdded));
         verifyKnownReceivedCount(headersAdded);
 
-        assertEquals(1, decHeaders.size());
+        assertThat(decHeaders.size(), is(1));
         verifyDecodedHeader(name, value);
     }
 
@@ -386,7 +390,7 @@ public class QpackEncoderDecoderTest {
         encode(out, encHeaders);
         decode(out, decHeaders);
 
-        assertEquals(5, decHeaders.size());
+        assertThat(decHeaders.size(), is(5));
         verifyDecodedHeader(":authority", "netty.quic");
         verifyDecodedHeader(":path", "/");
         verifyDecodedHeader(":method", "GET");
@@ -406,6 +410,107 @@ public class QpackEncoderDecoderTest {
         assertThrows(QpackException.class, () -> decode(out, decHeaders));
     }
 
+    @Test
+    public void sensitiveHeaderIsNotInsertedIntoDynamicTable() throws Exception {
+        sensitivityDetector = (name, value) -> "authorization".contentEquals(name);
+        setup(128, 0);
+
+        encHeaders.add("authorization", "Bearer secret");
+        encHeaders.add("foo", "bar");
+        encode(out, encHeaders);
+
+        // Only the non-sensitive sibling should consume a dynamic-table slot.
+        verifyRequiredInsertCount(1);
+        assertThat("Sensitive header must not be inserted into the encoder dynamic table.",
+                encDynamicTable.getEntryIndex("authorization", "Bearer secret"),
+                is(QpackEncoderDynamicTable.NOT_FOUND));
+        assertThat("Non-sensitive header must still be inserted into the encoder dynamic table.",
+                encDynamicTable.getEntryIndex("foo", "bar"), greaterThanOrEqualTo(0));
+
+        decode(out, decHeaders);
+        assertThat(decDynamicTable.insertCount(), is(1));
+        assertThat(decHeaders.size(), is(2));
+        verifyDecodedHeader("authorization", "Bearer secret");
+        verifyDecodedHeader("foo", "bar");
+    }
+
+    @Test
+    public void sensitiveHeaderWithStaticExactMatchUsesIndexedStatic() throws Exception {
+        sensitivityDetector = QpackSensitivityDetector.ALWAYS_SENSITIVE;
+        setup(128, 0);
+
+        encHeaders.add(":method", "GET");
+        encode(out, encHeaders);
+
+        verifyRequiredInsertCount(0);
+        assertThat("No dynamic-table insert expected for sensitive static exact match.",
+                encDynamicTable.insertCount(), is(0));
+
+        // First literal byte (byte 2) is an indexed-field-line with T=1.
+        assertThat("Section prefix required_insert_count byte must be 0.", (int) out.getByte(0), is(0));
+        assertThat("Section prefix delta_base byte must be 0.",            (int) out.getByte(1), is(0));
+        int firstLiteralByte = out.getByte(2) & 0xFF;
+        assertThat("Indexed-static-reference literal must start with 0b11 prefix.",
+                firstLiteralByte & 0b1100_0000, is(0b1100_0000));
+
+        decode(out, decHeaders);
+        assertThat(decDynamicTable.insertCount(), is(0));
+        assertThat(decHeaders.size(), is(1));
+        verifyDecodedHeader(":method", "GET");
+    }
+
+    @Test
+    public void sensitiveHeaderWithStaticNameRefSetsNeverIndexBit() throws Exception {
+        sensitivityDetector = QpackSensitivityDetector.ALWAYS_SENSITIVE;
+        setup(128, 0);
+
+        encHeaders.add(":authority", "netty.quic");
+        encode(out, encHeaders);
+
+        verifyRequiredInsertCount(0);
+        assertThat("No dynamic-table insert expected for sensitive header.",
+                encDynamicTable.insertCount(), is(0));
+
+        // Layout 0 1 N T NameIndex(4+); N is bit 5, T is bit 4 (=1 for static).
+        int firstLiteralByte = out.getByte(2) & 0xFF;
+        assertThat("High two bits must be 01 for literal-with-name-ref.",
+                firstLiteralByte & 0b1100_0000, is(0b0100_0000));
+        assertThat("Never-Indexed (N) bit must be set for sensitive header.",
+                firstLiteralByte & 0b0010_0000, is(0b0010_0000));
+        assertThat("T bit must be 1 (static table).",
+                firstLiteralByte & 0b0001_0000, is(0b0001_0000));
+
+        decode(out, decHeaders);
+        assertThat(decDynamicTable.insertCount(), is(0));
+        assertThat(decHeaders.size(), is(1));
+        verifyDecodedHeader(":authority", "netty.quic");
+    }
+
+    @Test
+    public void sensitiveHeaderWithLiteralNameSetsNeverIndexBit() throws Exception {
+        sensitivityDetector = QpackSensitivityDetector.ALWAYS_SENSITIVE;
+        setup(128, 0);
+
+        encHeaders.add("x-secret", "shhh");
+        encode(out, encHeaders);
+
+        verifyRequiredInsertCount(0);
+        assertThat("No dynamic-table insert expected for sensitive header.",
+                encDynamicTable.insertCount(), is(0));
+
+        // Layout 0 0 1 N H NameLen(3+); N is bit 4, H is bit 3 (=1, Huffman).
+        int firstLiteralByte = out.getByte(2) & 0xFF;
+        assertThat("High three bits must be 001 for literal-with-literal-name.",
+                firstLiteralByte & 0b1110_0000, is(0b0010_0000));
+        assertThat("Never-Indexed (N) bit must be set for sensitive header.",
+                firstLiteralByte & 0b0001_0000, is(0b0001_0000));
+
+        decode(out, decHeaders);
+        assertThat(decDynamicTable.insertCount(), is(0));
+        assertThat(decHeaders.size(), is(1));
+        verifyDecodedHeader("x-secret", "shhh");
+    }
+
     private void resetState() {
         out.clear();
         encHeaders.clear();
@@ -414,7 +519,7 @@ public class QpackEncoderDecoderTest {
 
     private void encode(ByteBuf buf, Http3Headers headers) {
         encoder.encodeHeaders(attributes, buf, DEFAULT, 1, headers);
-        assertTrue(parent.isActive());
+        assertThat("Parent channel closed.", parent.isActive(), is(true));
     }
 
     private void decode(ByteBuf buf, Http3Headers headers) throws QpackException {
@@ -430,11 +535,11 @@ public class QpackEncoderDecoderTest {
                         throw new AssertionError("Decode failed.", e);
                     }
                 });
-        assertTrue(parent.isActive());
+        assertThat("Parent channel closed.", parent.isActive(), is(true));
     }
 
     private void verifyDecodedHeader(CharSequence name, CharSequence value) {
-        assertEquals(new AsciiString(value), decHeaders.get(name));
+        assertThat(decHeaders.get(name), is(new AsciiString(value)));
     }
 
     private void drainAllSuspendedEncoderInstructions() throws Exception {
@@ -446,7 +551,7 @@ public class QpackEncoderDecoderTest {
 
     private void drainNextSuspendedEncoderInstruction() throws Exception {
         Callable<Void> next = suspendedEncoderInstructions.poll();
-        assertNotNull(next); // dynamic table size instruction
+        assertThat(next, is(notNullValue())); // dynamic table size instruction
         next.call();
     }
 
@@ -458,9 +563,9 @@ public class QpackEncoderDecoderTest {
         attributes = new QpackAttributes(parent, false);
         Http3.setQpackAttributes(parent, attributes);
         maxEntries = Math.toIntExact(QpackUtil.maxEntries(maxTableCapacity));
-        DefaultHttp3SettingsFrame localSettings = new DefaultHttp3SettingsFrame();
-        localSettings.put(HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, maxTableCapacity);
-        localSettings.put(HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS, (long) maxBlockedStreams);
+        DefaultHttp3SettingsFrame localSettingsFrame = new DefaultHttp3SettingsFrame();
+        localSettingsFrame.settings().put(HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY.id(), maxTableCapacity);
+        localSettingsFrame.settings().put(HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS.id(), (long) maxBlockedStreams);
         if (maxBlockedStreams > 0) {
             // section acknowledgment will implicitly ack insert count.
             stateSyncStrategyAckNextInsert = false;
@@ -469,7 +574,7 @@ public class QpackEncoderDecoderTest {
         encDynamicTable = new QpackEncoderDynamicTable(16, expectedTableFreePercentage);
         decDynamicTable = new QpackDecoderDynamicTable();
         decoder = new QpackDecoder(maxTableCapacity, maxBlockedStreams, decDynamicTable, syncStrategy);
-        encoder = new QpackEncoder(encDynamicTable);
+        encoder = new QpackEncoder(encDynamicTable, sensitivityDetector);
         if (maxBlockedStreams > 0) {
             suspendedEncoderInstructions = new LinkedBlockingQueue<>();
         }
@@ -496,14 +601,14 @@ public class QpackEncoderDecoderTest {
     }
 
     private void verifyRequiredInsertCount(int insertCount) {
-        assertEquals(insertCount == 0 ? 0 : insertCount % (2 * maxEntries) + 1,
+        assertThat("Unexpected dynamic table insert count.",
                 encDynamicTable.encodedRequiredInsertCount(encDynamicTable.insertCount()),
-                "Unexpected dynamic table insert count.");
+                is(insertCount == 0 ? 0 : insertCount % (2 * maxEntries) + 1));
     }
 
     private void verifyKnownReceivedCount(int receivedCount) {
-        assertEquals(receivedCount == 0 ? 0 : receivedCount % (2 * maxEntries) + 1,
-                encDynamicTable.encodedKnownReceivedCount(), "Unexpected dynamic table known received count.");
+        assertThat("Unexpected dynamic table known received count.", encDynamicTable.encodedKnownReceivedCount(),
+                is(receivedCount == 0 ? 0 : receivedCount % (2 * maxEntries) + 1));
     }
 
     private static final class ForwardWriteToReadOnOtherHandler extends ChannelOutboundHandlerAdapter {

@@ -15,6 +15,7 @@
  */
 package io.netty.incubator.codec.http3;
 
+import io.netty.util.CharsetUtil;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.StringUtil;
 
@@ -35,10 +36,15 @@ public final class WebTransportCloseSessionCapsule implements WebTransportCapsul
      * @param applicationErrorCode the application-defined 32-bit error code
      * @param errorReason          the human-readable reason string (must not be {@code null}, may be empty,
      *                             UTF-8 encoded, max {@value WebTransportCodecUtils#WT_CLOSE_REASON_MAX_LEN} bytes)
+     * @throws IllegalArgumentException if the UTF-8 reason exceeds the maximum length
      */
     public WebTransportCloseSessionCapsule(int applicationErrorCode, String errorReason) {
         this.applicationErrorCode = applicationErrorCode;
         this.errorReason = ObjectUtil.checkNotNull(errorReason, "errorReason");
+        if (errorReason.getBytes(CharsetUtil.UTF_8).length > WebTransportCodecUtils.WT_CLOSE_REASON_MAX_LEN) {
+            throw new IllegalArgumentException("errorReason must not exceed " +
+                    WebTransportCodecUtils.WT_CLOSE_REASON_MAX_LEN + " UTF-8 bytes");
+        }
     }
 
     /**

@@ -18,7 +18,7 @@ package io.netty.incubator.codec.http3;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicStreamType;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -33,7 +33,10 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 public class WebTransportCapsuleCodecTest {
 
@@ -447,7 +450,206 @@ public class WebTransportCapsuleCodecTest {
         buf.writeBytes(new byte[]{1, 2, 3});
 
         ch.writeInbound(buf);
-        Http3TestUtils.verifyClose(Http3ErrorCode.H3_MESSAGE_ERROR, parent);
+        assertEquals(Http3ErrorCode.H3_MESSAGE_ERROR.code, ch.outputShutdownError());
+        assertTrue(parent.isActive());
+        assertFalse(ch.finish());
+        assertFalse(parent.finish());
+    }
+
+    @Test
+    void testCloseReasonLimitCountsUtf8Bytes() {
+        StringBuilder reason = new StringBuilder();
+        for (int i = 0; i < 512; ++i) {
+            reason.append('\u00e9');
+        }
+        new WebTransportCloseSessionCapsule(0, reason.toString());
+        reason.append('\u00e9');
+        assertThrows(IllegalArgumentException.class,
+                () -> new WebTransportCloseSessionCapsule(0, reason.toString()));
+    }
+
+    @Test
+    void testRejectCloseReasonTooLongBeforeBufferingPayload() {
+        ByteBuf header = Unpooled.buffer();
+        writeVariableLengthInteger(header, CAPSULE_TYPE_CLOSE_WEBTRANSPORT_SESSION);
+        writeVariableLengthInteger(header, 4 + WebTransportCodecUtils.WT_CLOSE_REASON_MAX_LEN + 1);
+        assertMalformedCapsule(header, false);
+    }
+
+    @Test
+    void testRejectInvalidUtf8CloseReason() {
+        byte[][] invalidReasons = {
+                {(byte) 0x80},
+                {(byte) 0xc0, (byte) 0x80},
+                {(byte) 0xed, (byte) 0xa0, (byte) 0x80},
+                {(byte) 0xf0, (byte) 0x9f, (byte) 0x92}
+        };
+        for (byte[] reason : invalidReasons) {
+            ByteBuf capsule = Unpooled.buffer();
+            writeVariableLengthInteger(capsule, CAPSULE_TYPE_CLOSE_WEBTRANSPORT_SESSION);
+            writeVariableLengthInteger(capsule, 4 + reason.length);
+            capsule.writeInt(1).writeBytes(reason);
+            assertMalformedCapsule(capsule, false);
+        }
+    }
+
+    @Test
+    void testRejectNonemptyDrainBeforeBufferingPayload() {
+        ByteBuf header = Unpooled.buffer();
+        writeVariableLengthInteger(header, CAPSULE_TYPE_DRAIN_WEBTRANSPORT_SESSION);
+        writeVariableLengthInteger(header, 1);
+        assertMalformedCapsule(header, false);
+    }
+
+    @Test
+    void testRejectTruncatedCapsulesAtFin() {
+        ByteBuf capsule = Unpooled.buffer();
+        writeVariableLengthInteger(capsule, CAPSULE_TYPE_CLOSE_WEBTRANSPORT_SESSION);
+        // Use a non-minimal length encoding to exercise a fragmented length varint, too.
+        capsule.writeShort(0x4005).writeInt(1).writeByte('x');
+        try {
+            for (int length = 1; length < capsule.readableBytes(); ++length) {
+                assertMalformedCapsule(capsule.copy(0, length), true);
+            }
+        } finally {
+            capsule.release();
+        }
+    }
+
+    @Test
+    void testDiscardUnknownCapsuleIncrementally() {
+        EmbeddedChannel ch = new EmbeddedChannel(new WebTransportCapsuleDecoder());
+        ByteBuf header = Unpooled.buffer();
+        writeVariableLengthInteger(header, 0x12345);
+        writeVariableLengthInteger(header, 100);
+        assertFalse(ch.writeInbound(header));
+        assertEquals(0, header.refCnt());
+        ByteBuf firstPart = Unpooled.buffer().writeZero(99);
+        assertFalse(ch.writeInbound(firstPart));
+        assertEquals(0, firstPart.refCnt());
+        ByteBuf lastPart = Unpooled.buffer().writeByte(0);
+        writeVariableLengthInteger(lastPart, CAPSULE_TYPE_DRAIN_WEBTRANSPORT_SESSION);
+        writeVariableLengthInteger(lastPart, 0);
+        assertTrue(ch.writeInbound(lastPart));
+        assertSame(WebTransportDrainSessionCapsule.INSTANCE, ch.readInbound());
+        assertFalse(ch.finish());
+    }
+
+    @Test
+    void testDiscardOversizedDatagramCapsule() {
+        EmbeddedChannel ch = new EmbeddedChannel(new WebTransportCapsuleDecoder());
+        int limit = WebTransportCapsuleDecoder.MAX_DATAGRAM_CAPSULE_LENGTH;
+        ByteBuf header = Unpooled.buffer();
+        writeVariableLengthInteger(header, CAPSULE_TYPE_DATAGRAM);
+        writeVariableLengthInteger(header, limit + 1);
+        assertFalse(ch.writeInbound(header));
+        assertEquals(0, header.refCnt());
+        ByteBuf payload = Unpooled.buffer().writeZero(limit);
+        assertFalse(ch.writeInbound(payload));
+        assertEquals(0, payload.refCnt());
+        ByteBuf remainder = Unpooled.buffer().writeByte(0);
+        writeVariableLengthInteger(remainder, CAPSULE_TYPE_DRAIN_WEBTRANSPORT_SESSION);
+        writeVariableLengthInteger(remainder, 0);
+        assertTrue(ch.writeInbound(remainder));
+        assertSame(WebTransportDrainSessionCapsule.INSTANCE, ch.readInbound());
+        assertFalse(ch.finish());
+    }
+
+    @Test
+    void testAcceptMaximumDatagramCapsule() {
+        EmbeddedChannel ch = new EmbeddedChannel(new WebTransportCapsuleDecoder());
+        int limit = WebTransportCapsuleDecoder.MAX_DATAGRAM_CAPSULE_LENGTH;
+        assertTrue(ch.writeInbound(encodedCapsule(CAPSULE_TYPE_DATAGRAM, new byte[limit])));
+        WebTransportDatagramCapsule capsule = ch.readInbound();
+        assertEquals(limit, capsule.content().readableBytes());
+        capsule.release();
+        assertFalse(ch.finish());
+    }
+
+    @Test
+    void testDiscardCapsulesWithLengthGreaterThanIntegerMaxValue() {
+        for (long type : new long[] {0x12345, CAPSULE_TYPE_DATAGRAM}) {
+            EmbeddedQuicChannel parent = new EmbeddedQuicChannel(true);
+            EmbeddedQuicStreamChannel ch = new EmbeddedQuicStreamChannel(
+                    parent, false, QuicStreamType.BIDIRECTIONAL, 0, new WebTransportCapsuleDecoder());
+            ByteBuf header = Unpooled.buffer();
+            writeVariableLengthInteger(header, type);
+            writeVariableLengthInteger(header, 1L + Integer.MAX_VALUE);
+            assertFalse(ch.writeInbound(header));
+            assertEquals(0, header.refCnt());
+            assertNull(ch.outputShutdownError());
+            ByteBuf part = Unpooled.buffer().writeZero(32);
+            assertFalse(ch.writeInbound(part));
+            assertEquals(0, part.refCnt());
+            // Even a discarded capsule must be complete when the peer sends FIN.
+            ch.writeInboundFin();
+            assertEquals(Http3ErrorCode.H3_MESSAGE_ERROR.code, ch.outputShutdownError());
+            assertTrue(parent.isActive());
+            assertFalse(ch.finish());
+            assertFalse(parent.finish());
+        }
+    }
+
+    @Test
+    void testRejectDataAfterCloseCapsule() {
+        for (boolean separateRead : new boolean[] {false, true}) {
+            EmbeddedQuicChannel parent = new EmbeddedQuicChannel(true);
+            EmbeddedQuicStreamChannel ch = new EmbeddedQuicStreamChannel(
+                    parent, false, QuicStreamType.BIDIRECTIONAL, 0, new WebTransportCapsuleDecoder());
+            ByteBuf close = encodedCapsule(CAPSULE_TYPE_CLOSE_WEBTRANSPORT_SESSION, new byte[4]);
+            if (separateRead) {
+                assertTrue(ch.writeInbound(close));
+                ch.writeInbound(Unpooled.buffer().writeByte(0));
+            } else {
+                close.writeByte(0);
+                assertTrue(ch.writeInbound(close));
+            }
+            assertInstanceOf(WebTransportCloseSessionCapsule.class, ch.readInbound());
+            assertNull(ch.readInbound());
+            assertEquals(Http3ErrorCode.H3_MESSAGE_ERROR.code, ch.outputShutdownError());
+            assertTrue(parent.isActive());
+            assertFalse(ch.finish());
+            assertFalse(parent.finish());
+        }
+    }
+
+    @Test
+    void testMalformedCapsuleTerminatesSessionAndResetsChildren() {
+        EmbeddedQuicChannel parent = new EmbeddedQuicChannel(true);
+        EmbeddedQuicStreamChannel ch = new EmbeddedQuicStreamChannel(
+                parent, false, QuicStreamType.BIDIRECTIONAL, 0, new WebTransportCapsuleDecoder());
+        EmbeddedQuicStreamChannel child = new EmbeddedQuicStreamChannel(
+                parent, false, QuicStreamType.BIDIRECTIONAL, 4);
+        WebTransportSessionListener listener = mock(WebTransportSessionListener.class);
+        WebTransportSession session = new WebTransportSession(parent, ch, 0, listener);
+        WebTransportSessionRegistry registry = WebTransportSessionRegistry.getOrCreate(parent);
+        registry.register(0, session);
+        assertTrue(session.addStream(child));
+
+        assertFalse(ch.writeInbound(encodedCapsule(CAPSULE_TYPE_DRAIN_WEBTRANSPORT_SESSION, new byte[1])));
+        assertTrue(session.isClosed());
+        assertNull(registry.find(0));
+        verify(listener).onSessionClosed(session, 0, "");
+        assertEquals(WebTransportCodecUtils.WT_SESSION_GONE, child.inputShutdownError());
+        assertEquals(WebTransportCodecUtils.WT_SESSION_GONE, child.outputShutdownError());
+        assertEquals(Http3ErrorCode.H3_MESSAGE_ERROR.code, ch.outputShutdownError());
+        assertTrue(parent.isActive());
+        assertFalse(ch.finish());
+        assertFalse(child.finish());
+        assertFalse(parent.finish());
+    }
+
+    private static void assertMalformedCapsule(ByteBuf encoded, boolean fin) {
+        EmbeddedQuicChannel parent = new EmbeddedQuicChannel(true);
+        EmbeddedQuicStreamChannel ch = new EmbeddedQuicStreamChannel(
+                parent, false, QuicStreamType.BIDIRECTIONAL, 0, new WebTransportCapsuleDecoder());
+        assertFalse(ch.writeInbound(encoded));
+        if (fin) {
+            assertNull(ch.outputShutdownError());
+            ch.writeInboundFin();
+        }
+        assertEquals(Http3ErrorCode.H3_MESSAGE_ERROR.code, ch.outputShutdownError());
+        assertTrue(parent.isActive());
         assertFalse(ch.finish());
         assertFalse(parent.finish());
     }

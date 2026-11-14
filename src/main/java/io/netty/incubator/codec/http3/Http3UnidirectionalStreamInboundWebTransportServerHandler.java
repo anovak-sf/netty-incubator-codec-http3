@@ -19,8 +19,6 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.incubator.codec.http3.Http3FrameCodec.Http3FrameCodecFactory;
 import io.netty.incubator.codec.http3.Http3Settings.NonStandardHttp3SettingsValidator;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.function.LongFunction;
@@ -56,20 +54,7 @@ final class Http3UnidirectionalStreamInboundWebTransportServerHandler
     }
 
     @Override
-    void initWebTransportUnidirectionalStream(ChannelHandlerContext ctx, long sessionId) {
-        QuicChannel quicChannel = (QuicChannel) ctx.channel().parent();
-        WebTransportSessionRegistry registry = WebTransportSessionRegistry.get(quicChannel);
-        WebTransportSession session = registry != null ? registry.find(sessionId) : null;
-
-        if (session == null) {
-            Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_ID_ERROR,
-                    "WebTransport unidirectional stream references unknown session ID: " + sessionId, false);
-            return;
-        }
-
-        // Remove this detector and let the listener configure the pipeline.
-        QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
-        ctx.pipeline().remove(this);
-        session.listener().onUnidirectionalStream(session, streamChannel);
+    boolean supportsWebTransport() {
+        return true;
     }
 }

@@ -19,8 +19,9 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -30,6 +31,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static io.netty.incubator.codec.http3.Http3CodecUtils.writeVariableLengthInteger;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -178,6 +181,102 @@ public class WebTransportBidirectionalStreamDetectorTest {
     }
 
     @Test
+    void testPrefixAndPayloadInSameRead() throws Exception {
+        setup();
+        AtomicReference<ByteBuf> received = new AtomicReference<>();
+        WebTransportSession session = registerSession(0, recordingListener(received));
+        EmbeddedQuicStreamChannel stream = newBidiStream();
+        ByteBuf data = Unpooled.buffer();
+        writeVariableLengthInteger(data, 0x41);
+        writeVariableLengthInteger(data, 0);
+        data.writeByte(42);
+        assertFalse(stream.writeInbound(data));
+        assertEquals(42, received.get().readUnsignedByte());
+        received.get().release();
+        assertEquals(0, data.refCnt());
+        assertFalse(stream.finish());
+        assertFalse(((EmbeddedQuicStreamChannel) session.sessionStream()).finish());
+    }
+
+    @Test
+    void testFragmentedPrefixReleasesBuffersAndDeliversPayload() throws Exception {
+        setup();
+        AtomicReference<ByteBuf> received = new AtomicReference<>();
+        WebTransportSession session = registerSession(16384, recordingListener(received));
+        EmbeddedQuicStreamChannel stream = newBidiStream();
+        ByteBuf prefix = Unpooled.buffer();
+        writeVariableLengthInteger(prefix, 0x41);
+        writeVariableLengthInteger(prefix, 16384);
+        ByteBuf[] fragments = new ByteBuf[prefix.readableBytes()];
+        for (int i = 0; i < fragments.length; i++) {
+            fragments[i] = Unpooled.buffer(1, 1).writeByte(prefix.readByte());
+            assertFalse(stream.writeInbound(fragments[i]));
+        }
+        prefix.release();
+        ByteBuf payload = Unpooled.buffer(3).writeMedium(0x123456);
+        assertFalse(stream.writeInbound(payload));
+        assertEquals(0x123456, received.get().readUnsignedMedium());
+        received.get().release();
+        for (ByteBuf fragment : fragments) {
+            assertEquals(0, fragment.refCnt());
+        }
+        assertFalse(stream.finish());
+        assertFalse(((EmbeddedQuicStreamChannel) session.sessionStream()).finish());
+    }
+
+    @Test
+    void testStreamArrivingBeforeConnectIsBuffered() throws Exception {
+        setup();
+        AtomicReference<ByteBuf> received = new AtomicReference<>();
+        EmbeddedQuicStreamChannel stream = newBidiStream();
+        ByteBuf prefixAndPayload = Unpooled.buffer();
+        writeVariableLengthInteger(prefixAndPayload, 0x41);
+        writeVariableLengthInteger(prefixAndPayload, 4);
+        prefixAndPayload.writeByte(42);
+        assertFalse(stream.writeInbound(prefixAndPayload));
+        assertTrue(quicChannel.isActive());
+        assertNull(received.get());
+        WebTransportSession session = registerSession(4, recordingListener(received));
+        assertEquals(42, received.get().readUnsignedByte());
+        received.get().release();
+        assertEquals(0, prefixAndPayload.refCnt());
+        assertFalse(stream.finish());
+        assertFalse(((EmbeddedQuicStreamChannel) session.sessionStream()).finish());
+    }
+
+    @Test
+    void testIncompletePrefixReleasedWhenDetectorRemoved() throws Exception {
+        setup();
+        EmbeddedQuicStreamChannel stream = newBidiStream();
+        ByteBuf first = Unpooled.buffer(1, 1).writeByte(0x40);
+        assertFalse(stream.writeInbound(first));
+        stream.pipeline().replace(WebTransportBidirectionalStreamDetector.class, null,
+                Http3UnidirectionalStreamInboundHandler.ReleaseHandler.INSTANCE);
+        assertEquals(0, first.refCnt());
+        assertFalse(stream.finish());
+    }
+
+    private static WebTransportSessionListener recordingListener(AtomicReference<ByteBuf> received) {
+        return new WebTransportSessionListener() {
+            @Override
+            public void onBidirectionalStream(WebTransportSession session, QuicStreamChannel channel) {
+                channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                        assertNull(received.getAndSet((ByteBuf) msg));
+                    }
+                });
+            }
+            @Override
+            public void onUnidirectionalStream(WebTransportSession session, QuicStreamChannel channel) { }
+            @Override
+            public void onDatagram(WebTransportSession session, ByteBuf payload) { }
+            @Override
+            public void onSessionClosed(WebTransportSession session, int code, String reason) { }
+        };
+    }
+
+    @Test
     void testWtBidirectionalStreamWaitsForSessionId() throws Exception {
         setup();
         registerSession(0L, noopListener());
@@ -200,7 +299,7 @@ public class WebTransportBidirectionalStreamDetectorTest {
     }
 
     @ParameterizedTest(name = "{index}: sessionId={0}")
-    @ValueSource(longs = {64L, 100L, 16383L})
+    @ValueSource(longs = {64L, 100L, 16380L})
     void testWtBidirectionalSessionIdVarint2Byte(long sessionId) throws Exception {
         doWtStreamVarintTest(sessionId);
     }

@@ -19,8 +19,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -77,7 +77,6 @@ public class WebTransportClientSessionHandlerTest {
     private static DefaultHttp3Headers response2xx(String status) {
         DefaultHttp3Headers h = new DefaultHttp3Headers();
         h.status(status);
-        h.add(Http3Headers.PseudoHeaderName.PROTOCOL.value(), "webtransport");
         return h;
     }
 
@@ -112,7 +111,23 @@ public class WebTransportClientSessionHandlerTest {
         assertEquals("CONNECT", frame.headers().method().toString());
         assertEquals("webtransport",
                 frame.headers().get(Http3Headers.PseudoHeaderName.PROTOCOL.value()).toString());
+        assertEquals("1", frame.headers().get("sec-webtransport-http3-draft02").toString());
         assertFalse(ch.finish());
+    }
+
+    @Test
+    void testDraftNegotiationDoesNotModifyCallerHeaders() {
+        Http3Headers headers = connectHeaders().set("sec-webtransport-http3-draft02", "0");
+        EmbeddedQuicStreamChannel ch = new EmbeddedQuicStreamChannel(parent, true,
+                QuicStreamType.BIDIRECTIONAL, 0,
+                new WebTransportClientSessionHandler(headers, noopListener(), parent.newPromise()));
+        try {
+            Http3HeadersFrame request = ch.readOutbound();
+            assertEquals("1", request.headers().get("sec-webtransport-http3-draft02").toString());
+            assertEquals("0", headers.get("sec-webtransport-http3-draft02").toString());
+        } finally {
+            assertFalse(ch.finishAndReleaseAll());
+        }
     }
 
     @Test
@@ -127,7 +142,7 @@ public class WebTransportClientSessionHandlerTest {
     }
 
     @ParameterizedTest(name = "{index}: status={0}")
-    @ValueSource(strings = {"200", "201", "204"})
+    @ValueSource(strings = {"200", "201", "202"})
     void testSessionEstablishedOn2xxVariants(String status) {
         ChannelPromise[] p = new ChannelPromise[1];
         EmbeddedQuicStreamChannel ch = newClientStream(p);
@@ -169,7 +184,7 @@ public class WebTransportClientSessionHandlerTest {
     }
 
     @Test
-    void testSessionRejectedMissingProtocolHeader() {
+    void testSessionAcceptedWithoutProtocolHeader() {
         ChannelPromise[] p = new ChannelPromise[1];
         EmbeddedQuicStreamChannel ch = newClientStream(p);
         ch.readOutbound();
@@ -179,6 +194,56 @@ public class WebTransportClientSessionHandlerTest {
         // deliberately no :protocol header
         ch.writeInbound(new DefaultHttp3HeadersFrame(h));
 
+        assertTrue(p[0].isDone());
+        assertTrue(p[0].isSuccess());
+        assertFalse(ch.finish());
+    }
+
+    @Test
+    void testInformationalResponseBeforeSuccess() {
+        ChannelPromise[] p = new ChannelPromise[1];
+        EmbeddedQuicStreamChannel ch = newClientStream(p);
+        ch.readOutbound();
+        ch.writeInbound(new DefaultHttp3HeadersFrame(new DefaultHttp3Headers().status("103")));
+        assertFalse(p[0].isDone());
+        assertTrue(ch.isActive());
+        ch.writeInbound(new DefaultHttp3HeadersFrame(response2xx("200")));
+        assertTrue(p[0].isSuccess());
+        assertFalse(ch.finish());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"204", "205", "206", "101", "0200", "+200"})
+    void testInvalidCapsuleResponseStatus(String status) {
+        ChannelPromise[] p = new ChannelPromise[1];
+        EmbeddedQuicStreamChannel ch = newClientStream(p);
+        ch.readOutbound();
+        ch.writeInbound(new DefaultHttp3HeadersFrame(new DefaultHttp3Headers().status(status)));
+        assertTrue(p[0].isDone());
+        assertFalse(p[0].isSuccess());
+        assertEquals(Http3ErrorCode.H3_MESSAGE_ERROR.code(), ch.outputShutdownError());
+        assertFalse(ch.finish());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"content-length", "content-type", "transfer-encoding"})
+    void testRejectsForbiddenCapsuleResponseHeaders(String name) {
+        ChannelPromise[] p = new ChannelPromise[1];
+        EmbeddedQuicStreamChannel ch = newClientStream(p);
+        ch.readOutbound();
+        ch.writeInbound(new DefaultHttp3HeadersFrame(response2xx("200").add(name, "0")));
+        assertTrue(p[0].isDone());
+        assertFalse(p[0].isSuccess());
+        assertEquals(Http3ErrorCode.H3_MESSAGE_ERROR.code(), ch.outputShutdownError());
+        assertFalse(ch.finish());
+    }
+
+    @Test
+    void testFinBeforeFinalResponseFailsPromise() {
+        ChannelPromise[] p = new ChannelPromise[1];
+        EmbeddedQuicStreamChannel ch = newClientStream(p);
+        ch.readOutbound();
+        ch.writeInboundFin();
         assertTrue(p[0].isDone());
         assertFalse(p[0].isSuccess());
         assertFalse(ch.finish());

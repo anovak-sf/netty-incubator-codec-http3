@@ -20,9 +20,9 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.CharsetUtil;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.StringUtil;
@@ -30,7 +30,7 @@ import org.jetbrains.annotations.Nullable;
 
 import static io.netty.channel.ChannelFutureListener.CLOSE_ON_FAILURE;
 import static io.netty.incubator.codec.http3.Http3ErrorCode.H3_INTERNAL_ERROR;
-import static io.netty.incubator.codec.quic.QuicStreamType.UNIDIRECTIONAL;
+import static io.netty.handler.codec.quic.QuicStreamType.UNIDIRECTIONAL;
 
 final class Http3CodecUtils {
 
@@ -56,6 +56,15 @@ final class Http3CodecUtils {
     static final int HTTP3_PUSH_STREAM_TYPE = 0x01;
     static final int HTTP3_QPACK_ENCODER_STREAM_TYPE = 0x02;
     static final int HTTP3_QPACK_DECODER_STREAM_TYPE = 0x03;
+
+    /**
+     * Default is unlimited in the RFC but we want to enforce some "security" default limit.
+     * See <a href="https://datatracker.ietf.org/doc/html/rfc9114#section-4.2.2">RFC9114 Section 4.2.2</a>.
+     */
+    static final long DEFAULT_MAX_FIELD_SECTION_SIZE = 8192;
+
+    // Let's use 32kb as max
+    static final int DEFAULT_MAX_UNKNOWN_FRAME_PAYLOAD_LENGTH = 32 * 1024;
 
     private Http3CodecUtils() { }
 
@@ -259,7 +268,7 @@ final class Http3CodecUtils {
     /**
      * A connection-error should be handled as defined in the HTTP3 spec.
      *
-     * @param channel       the {@link Channel} on which error has occured.
+     * @param channel       the {@link Channel} on which error has occurred.
      * @param errorCode     the {@link Http3ErrorCode} that caused the error.
      * @param msg           the message that should be used as reason for the error, may be {@code null}.
      */

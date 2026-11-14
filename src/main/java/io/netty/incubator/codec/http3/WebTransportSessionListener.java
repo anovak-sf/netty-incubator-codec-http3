@@ -16,7 +16,7 @@
 package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 
 /**
  * Listener that receives events for an active {@link WebTransportSession}.
@@ -51,13 +51,20 @@ public interface WebTransportSessionListener {
     /**
      * Called when a datagram is received for this session.
      * <p>
-     * The {@code data} buffer's reference count is 1 and the caller will release it after this
+     * The caller will release the {@code data} buffer after this
      * method returns. Call {@code data.retain()} if you need to keep a reference.
      *
      * @param session the WebTransport session this datagram belongs to
      * @param data the datagram payload
      */
     void onDatagram(WebTransportSession session, ByteBuf data);
+
+    /**
+     * Called when the peer asks the application to finish using the session soon.
+     * Existing streams remain usable and the session is not closed by this signal.
+     * @param session the draining session
+     */
+    default void onSessionDraining(WebTransportSession session) { }
 
     /**
      * Called when the WebTransport session is closed.

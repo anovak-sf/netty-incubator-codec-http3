@@ -29,14 +29,14 @@ import io.netty.channel.MessageSizeEstimator;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicChannelConfig;
-import io.netty.incubator.codec.quic.QuicConnectionAddress;
-import io.netty.incubator.codec.quic.QuicConnectionPathStats;
-import io.netty.incubator.codec.quic.QuicConnectionStats;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
-import io.netty.incubator.codec.quic.QuicTransportParameters;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicChannelConfig;
+import io.netty.handler.codec.quic.QuicConnectionAddress;
+import io.netty.handler.codec.quic.QuicConnectionPathStats;
+import io.netty.handler.codec.quic.QuicConnectionStats;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicTransportParameters;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
@@ -74,6 +74,7 @@ final class EmbeddedQuicChannel extends EmbeddedChannel implements QuicChannel {
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ConcurrentLinkedQueue<Integer> closeErrorCodes = new ConcurrentLinkedQueue<>();
     private QuicChannelConfig config;
+    private QuicTransportParameters peerTransportParameters;
 
     EmbeddedQuicChannel(boolean server) {
         this(server, new ChannelHandler[0]);
@@ -200,7 +201,11 @@ final class EmbeddedQuicChannel extends EmbeddedChannel implements QuicChannel {
     @Override
     @Nullable
     public QuicTransportParameters peerTransportParameters() {
-        return null;
+        return peerTransportParameters;
+    }
+
+    void peerTransportParameters(QuicTransportParameters parameters) {
+        peerTransportParameters = parameters;
     }
 
     Collection<Integer> closeErrorCodes() {

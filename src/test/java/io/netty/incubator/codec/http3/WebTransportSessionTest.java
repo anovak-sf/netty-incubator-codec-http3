@@ -18,11 +18,18 @@ package io.netty.incubator.codec.http3;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerAdapter;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import io.netty.util.concurrent.Future;
+
+import java.nio.channels.ClosedChannelException;
 
 import static io.netty.incubator.codec.http3.Http3CodecUtils.numBytesForVariableLengthInteger;
 import static io.netty.incubator.codec.http3.Http3CodecUtils.readVariableLengthInteger;
@@ -32,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class WebTransportSessionTest {
@@ -52,8 +60,8 @@ public class WebTransportSessionTest {
 
     @AfterEach
     void tearDown() {
-        sessionStream.finish();
-        quicChannel.finish();
+        sessionStream.finishAndReleaseAll();
+        quicChannel.finishAndReleaseAll();
     }
 
     private static WebTransportSessionListener noopListener() {
@@ -122,16 +130,19 @@ public class WebTransportSessionTest {
     }
 
     @Test
-    void testSendDatagramWritesCapsule() {
+    void testSendDatagramWritesQuicDatagram() {
         ByteBuf payload = Unpooled.wrappedBuffer(new byte[]{1, 2, 3});
         session.sendDatagram(payload);
         payload.release();
 
-        Object written = sessionStream.readOutbound();
-        assertInstanceOf(WebTransportDatagramCapsule.class, written);
-        WebTransportDatagramCapsule capsule = (WebTransportDatagramCapsule) written;
-        assertEquals(3, capsule.content().readableBytes());
-        capsule.release();
+        ByteBuf datagram = quicChannel.readOutbound();
+        assertEquals(0, datagram.readUnsignedByte());
+        assertEquals(3, datagram.readableBytes());
+        assertEquals(1, datagram.readUnsignedByte());
+        assertEquals(2, datagram.readUnsignedByte());
+        assertEquals(3, datagram.readUnsignedByte());
+        datagram.release();
+        assertNull(sessionStream.readOutbound());
     }
 
     @Test
@@ -140,14 +151,14 @@ public class WebTransportSessionTest {
         assertEquals(1, payload.refCnt());
 
         session.sendDatagram(payload);
-        // retainedDuplicate() increments refCnt; caller still owns the buffer (refCnt = 2)
-        assertEquals(2, payload.refCnt());
+        // The caller's ownership and reader index are preserved.
+        assertEquals(1, payload.refCnt());
+        assertEquals(0, payload.readerIndex());
 
         payload.release();
-        // Drain the written capsule
-        WebTransportDatagramCapsule capsule = sessionStream.readOutbound();
-        assertNotNull(capsule);
-        capsule.release();
+        ByteBuf datagram = quicChannel.readOutbound();
+        assertNotNull(datagram);
+        datagram.release();
     }
 
     @Test
@@ -162,10 +173,121 @@ public class WebTransportSessionTest {
     }
 
     @Test
-    void testCloseSessionThenClosesChannel() throws Exception {
+    void testCloseSessionSendsFin() throws Exception {
         assertTrue(sessionStream.isActive());
         session.closeSession(0, "").sync();
-        // After the write+close chain completes, the session stream should be closed
-        assertFalse(sessionStream.isActive());
+        assertTrue(sessionStream.isOutputShutdown());
+        assertTrue(session.isClosed());
+    }
+
+    @Test
+    void testDatagramUsesQuarterStreamIdWithoutContextId() {
+        WebTransportSession otherSession = new WebTransportSession(quicChannel, sessionStream, 256, noopListener());
+        ByteBuf payload = Unpooled.buffer().writeByte(42);
+        otherSession.sendDatagram(payload);
+        payload.release();
+        ByteBuf datagram = quicChannel.readOutbound();
+        assertEquals(64, readVariableLengthInteger(datagram, 2));
+        assertEquals(42, datagram.readUnsignedByte());
+        assertFalse(datagram.isReadable());
+        datagram.release();
+    }
+
+    @Test
+    void testSessionClosureResetsAllAssociatedStreamsAndRejectsNewTraffic() throws Exception {
+        EmbeddedQuicStreamChannel outbound = (EmbeddedQuicStreamChannel) session.openBidirectionalStream(
+                new ChannelHandlerAdapter() { }).get();
+        EmbeddedQuicStreamChannel inbound = new EmbeddedQuicStreamChannel(
+                quicChannel, false, QuicStreamType.UNIDIRECTIONAL, 3);
+        try {
+            assertTrue(session.addStream(inbound));
+            session.closeSession(0, "").sync();
+            assertEquals(WebTransportCodecUtils.WT_SESSION_GONE, outbound.outputShutdownError());
+            assertEquals(WebTransportCodecUtils.WT_SESSION_GONE, inbound.inputShutdownError());
+            assertNull(inbound.outputShutdownError());
+            assertFalse(session.openBidirectionalStream(new ChannelHandlerAdapter() { }).isSuccess());
+            assertFalse(session.openUnidirectionalStream(new ChannelHandlerAdapter() { }).isSuccess());
+            ByteBuf payload = Unpooled.buffer().writeByte(1);
+            assertFalse(session.sendDatagram(payload).isSuccess());
+            assertEquals(1, payload.refCnt());
+            payload.release();
+            assertNull(quicChannel.readOutbound());
+        } finally {
+            outbound.finishAndReleaseAll();
+            inbound.finishAndReleaseAll();
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(QuicStreamType.class)
+    void testSessionTerminationDuringStreamCreationFailsFuture(QuicStreamType type) {
+        EmbeddedQuicStreamChannel[] created = new EmbeddedQuicStreamChannel[1];
+        ChannelInboundHandlerAdapter handler = new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelActive(ChannelHandlerContext ctx) {
+                created[0] = (EmbeddedQuicStreamChannel) ctx.channel();
+                session.terminate(0, "");
+                ctx.fireChannelActive();
+            }
+        };
+        Future<QuicStreamChannel> future = type == QuicStreamType.BIDIRECTIONAL
+                ? session.openBidirectionalStream(handler) : session.openUnidirectionalStream(handler);
+        assertNotNull(created[0]);
+        try {
+            assertTrue(future.isDone());
+            assertFalse(future.isSuccess());
+            assertInstanceOf(ClosedChannelException.class, future.cause());
+            assertEquals(WebTransportCodecUtils.WT_SESSION_GONE, created[0].outputShutdownError());
+            if (type == QuicStreamType.UNIDIRECTIONAL) {
+                assertNull(created[0].inputShutdownError());
+            } else {
+                assertEquals(WebTransportCodecUtils.WT_SESSION_GONE, created[0].inputShutdownError());
+            }
+        } finally {
+            created[0].finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    void testPeerFinTerminatesSessionBeforeChannelInactive() {
+        sessionStream.pipeline().addLast(new WebTransportSessionStreamHandler(session));
+        WebTransportSessionRegistry.getOrCreate(quicChannel).register(SESSION_ID, session);
+        sessionStream.writeInboundFin();
+        assertTrue(session.isClosed());
+        assertTrue(sessionStream.isOutputShutdown());
+        assertNull(WebTransportSessionRegistry.get(quicChannel).find(SESSION_ID));
+    }
+
+    @Test
+    void testCloseCapsuleNotifiesOnceAndDrainIsExposed() {
+        int[] calls = new int[2];
+        WebTransportSession observed = new WebTransportSession(quicChannel, sessionStream, SESSION_ID,
+                new WebTransportSessionListener() {
+                    @Override
+                    public void onBidirectionalStream(WebTransportSession s, QuicStreamChannel c) { }
+                    @Override
+                    public void onUnidirectionalStream(WebTransportSession s, QuicStreamChannel c) { }
+                    @Override
+                    public void onDatagram(WebTransportSession s, ByteBuf data) { }
+                    @Override
+                    public void onSessionDraining(WebTransportSession s) {
+                        calls[0]++;
+                    }
+                    @Override
+                    public void onSessionClosed(WebTransportSession s, int code, String reason) {
+                        assertEquals(42, code);
+                        assertEquals("done", reason);
+                        calls[1]++;
+                    }
+                });
+        sessionStream.pipeline().addLast(new WebTransportSessionStreamHandler(observed));
+        sessionStream.writeInbound(WebTransportDrainSessionCapsule.INSTANCE);
+        assertFalse(observed.isClosed());
+        sessionStream.writeInbound(new WebTransportCloseSessionCapsule(42, "done"));
+        assertTrue(observed.isClosed());
+        sessionStream.writeInboundFin();
+        sessionStream.close();
+        assertEquals(1, calls[0]);
+        assertEquals(1, calls[1]);
     }
 }

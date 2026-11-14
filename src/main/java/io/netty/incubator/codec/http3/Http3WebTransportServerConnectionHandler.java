@@ -18,7 +18,7 @@ package io.netty.incubator.codec.http3;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.internal.ObjectUtil;
 import org.jetbrains.annotations.Nullable;
 
@@ -96,9 +96,15 @@ public final class Http3WebTransportServerConnectionHandler extends Http3Connect
             @Nullable Http3SettingsFrame localSettings,
             boolean disableQpackDynamicTable) {
         super(true, inboundControlStreamHandler, unknownInboundStreamHandlerFactory,
-                localSettings, disableQpackDynamicTable, null);
+                localSettings == null ? defaultWebTransportSettings() : localSettings,
+                disableQpackDynamicTable, null, Http3CodecUtils.DEFAULT_MAX_UNKNOWN_FRAME_PAYLOAD_LENGTH);
         this.acceptor = ObjectUtil.checkNotNull(acceptor, "acceptor");
         this.fallbackRequestStreamHandler = fallbackRequestStreamHandler;
+    }
+
+    private static Http3SettingsFrame defaultWebTransportSettings() {
+        return new DefaultHttp3SettingsFrame(Http3Settings.defaultSettings()
+                .enableConnectProtocol(true).enableH3Datagram(true).enableWebTransport(true));
     }
 
     /**

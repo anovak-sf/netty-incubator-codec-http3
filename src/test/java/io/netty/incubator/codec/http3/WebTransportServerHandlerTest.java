@@ -19,11 +19,14 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -86,6 +89,77 @@ public class WebTransportServerHandlerTest {
                 handlers.toArray(new io.netty.channel.ChannelHandler[0]));
     }
 
+    @Test
+    void testWaitsForPeerSettingsAndReplaysCapsules() throws Exception {
+        Http3WebTransportServerConnectionHandler connection =
+                new Http3WebTransportServerConnectionHandler(headers -> null);
+        parent.pipeline().addLast(connection);
+        parent.pipeline().fireUserEventTriggered(Http3TestUtils.datagramExtensionEvent());
+        AtomicInteger datagram = new AtomicInteger(-1);
+        WebTransportSessionListener listener = new WebTransportSessionListener() {
+            @Override
+            public void onBidirectionalStream(WebTransportSession session, QuicStreamChannel stream) { }
+            @Override
+            public void onUnidirectionalStream(WebTransportSession session, QuicStreamChannel stream) { }
+            @Override
+            public void onDatagram(WebTransportSession session, ByteBuf payload) {
+                datagram.set(payload.getUnsignedByte(payload.readerIndex()));
+            }
+            @Override
+            public void onSessionClosed(WebTransportSession session, int code, String reason) { }
+        };
+        EmbeddedQuicStreamChannel ch = newStreamChannel(listener);
+        ch.writeInbound(new DefaultHttp3HeadersFrame(wtConnectHeaders()));
+        ch.writeInbound(capsuleFrame(new WebTransportDatagramCapsule(Unpooled.buffer().writeByte(47))));
+        assertNull(ch.readOutbound());
+        assertNull(WebTransportSessionRegistry.get(parent));
+        assertEquals(-1, datagram.get());
+
+        // Also verifies that the server's no-settings constructor actually enables WebTransport.
+        connection.peerSettingsReceived(new DefaultHttp3SettingsFrame(new Http3Settings()
+                .enableH3Datagram(true).enableWebTransport(true)));
+        parent.runPendingTasks();
+        assertEquals("200", ((Http3HeadersFrame) ch.readOutbound()).headers().status().toString());
+        assertEquals(47, datagram.get());
+        assertFalse(ch.finishAndReleaseAll());
+        parent.localControlStream().finishAndReleaseAll();
+    }
+
+    @Test
+    void testRejectsPeerWithoutWebTransportSettings() {
+        Http3WebTransportServerConnectionHandler connection =
+                new Http3WebTransportServerConnectionHandler(headers -> null);
+        parent.pipeline().addLast(connection);
+        EmbeddedQuicStreamChannel ch = newStreamChannel(noopListener());
+        ch.writeInbound(new DefaultHttp3HeadersFrame(wtConnectHeaders()));
+        connection.peerSettingsReceived(new DefaultHttp3SettingsFrame());
+        parent.runPendingTasks();
+        assertEquals("400", ((Http3HeadersFrame) ch.readOutbound()).headers().status().toString());
+        assertNull(WebTransportSessionRegistry.get(parent));
+        assertFalse(ch.finishAndReleaseAll());
+        parent.localControlStream().finishAndReleaseAll();
+    }
+
+    @Test
+    void testFinWhileWaitingForSettingsReleasesBufferedData() {
+        Http3WebTransportServerConnectionHandler connection =
+                new Http3WebTransportServerConnectionHandler(headers -> null);
+        parent.pipeline().addLast(connection);
+        EmbeddedQuicStreamChannel ch = newStreamChannel(noopListener());
+        ch.writeInbound(new DefaultHttp3HeadersFrame(wtConnectHeaders()));
+        ByteBuf bytes = Unpooled.buffer().writeByte(0);
+        ch.writeInbound(new DefaultHttp3DataFrame(bytes));
+        assertEquals(1, bytes.refCnt());
+        ch.writeInboundFin();
+        assertEquals(0, bytes.refCnt());
+        connection.peerSettingsReceived(new DefaultHttp3SettingsFrame(new Http3Settings()
+                .enableH3Datagram(true).enableWebTransport(true)));
+        parent.runPendingTasks();
+        assertNull(ch.readOutbound());
+        assertFalse(ch.finishAndReleaseAll());
+        parent.localControlStream().finishAndReleaseAll();
+    }
+
     // ---- Happy path: session establishment ----
 
     @Test
@@ -93,10 +167,12 @@ public class WebTransportServerHandlerTest {
         EmbeddedQuicStreamChannel ch = newStreamChannel(noopListener());
         ch.writeInbound(new DefaultHttp3HeadersFrame(wtConnectHeaders()));
 
-        // Response: 200 with :protocol: webtransport
+        // :protocol is a request-only pseudo-header.
         DefaultHttp3HeadersFrame resp = ch.readOutbound();
         assertNotNull(resp);
         assertEquals("200", resp.headers().status().toString());
+        assertEquals("draft02", resp.headers().get("sec-webtransport-http3-draft").toString());
+        assertNull(resp.headers().get(Http3Headers.PseudoHeaderName.PROTOCOL.value()));
         assertFalse(ch.finish());
     }
 
@@ -179,6 +255,8 @@ public class WebTransportServerHandlerTest {
         DefaultHttp3HeadersFrame resp = ch.readOutbound();
         assertNotNull(resp);
         assertEquals("400", resp.headers().status().toString());
+        assertTrue(ch.isOutputShutdown());
+        assertEquals(0, ch.outputShutdownError());
         assertFalse(ch.finish());
     }
 
@@ -200,6 +278,21 @@ public class WebTransportServerHandlerTest {
     void testRejectsMissingScheme() {
         DefaultHttp3Headers headers = wtConnectHeaders();
         headers.remove(Http3Headers.PseudoHeaderName.SCHEME.value());
+        assertRejectedWithStatus(headers, "400");
+    }
+
+    @Test
+    void testRejectsHttpScheme() {
+        DefaultHttp3Headers headers = wtConnectHeaders();
+        headers.scheme("http");
+        assertRejectedWithStatus(headers, "400");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"content-length", "content-type", "transfer-encoding"})
+    void testRejectsForbiddenCapsuleHeaders(String name) {
+        DefaultHttp3Headers headers = wtConnectHeaders();
+        headers.add(name, "0");
         assertRejectedWithStatus(headers, "400");
     }
 
@@ -327,8 +420,7 @@ public class WebTransportServerHandlerTest {
         ch.writeInbound(new DefaultHttp3HeadersFrame(wtConnectHeaders()));
         ch.readOutbound(); // consume 200 response
 
-        // Write a DATAGRAM capsule object directly (no decoder in pipeline since Http3FrameCodec absent)
-        ch.writeInbound(new WebTransportDatagramCapsule(Unpooled.wrappedBuffer(new byte[]{42})));
+        ch.writeInbound(capsuleFrame(new WebTransportDatagramCapsule(Unpooled.wrappedBuffer(new byte[]{42}))));
 
         assertNotNull(receivedPayload.get());
         assertEquals(42, receivedPayload.get().readByte());
@@ -358,7 +450,7 @@ public class WebTransportServerHandlerTest {
         ch.writeInbound(new DefaultHttp3HeadersFrame(wtConnectHeaders()));
         ch.readOutbound();
 
-        ch.writeInbound(new WebTransportCloseSessionCapsule(7, "goodbye"));
+        ch.writeInbound(capsuleFrame(new WebTransportCloseSessionCapsule(7, "goodbye")));
         // Channel should be closed; channelInactive fires onSessionClosed
         assertEquals(7, closedCode.get());
         assertEquals("goodbye", closedReason.get());
@@ -372,9 +464,17 @@ public class WebTransportServerHandlerTest {
         ch.readOutbound();
 
         // Should not throw, channel should stay open
-        ch.writeInbound(WebTransportDrainSessionCapsule.INSTANCE);
+        ch.writeInbound(capsuleFrame(WebTransportDrainSessionCapsule.INSTANCE));
         assertTrue(ch.isActive());
         assertFalse(ch.finish());
+    }
+
+    private static Http3DataFrame capsuleFrame(WebTransportCapsule capsule) {
+        EmbeddedChannel encoder = new EmbeddedChannel(WebTransportCapsuleEncoder.INSTANCE);
+        encoder.writeOutbound(capsule);
+        ByteBuf content = encoder.readOutbound();
+        assertFalse(encoder.finishAndReleaseAll());
+        return new DefaultHttp3DataFrame(content);
     }
 
     @Test

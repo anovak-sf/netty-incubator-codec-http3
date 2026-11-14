@@ -18,22 +18,26 @@ package io.netty.incubator.codec.http3;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelPipeline;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
+import io.netty.channel.socket.ChannelInputShutdownEvent;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.ArrayDeque;
+import java.util.Queue;
+
 /**
  * Server-side handler that detects and establishes WebTransport sessions.
  * <p>
- * Install this as the {@code requestStreamHandler} argument to {@link Http3ServerConnectionHandler}.
+ * Use {@link Http3WebTransportServerConnectionHandler} to install this handler together with
+ * WebTransport data-stream routing.
  * When an Extended CONNECT request with {@code :protocol: webtransport} is received, this handler
  * invokes the configured {@link WebTransportSessionAcceptor} to decide whether to accept. If accepted,
- * it sends a 200 response, rewires the stream pipeline to the RFC 9297 capsule protocol, and creates
+ * it sends a 200 response, enables the RFC 9297 capsule protocol over HTTP/3 DATA frames, and creates
  * a {@link WebTransportSession}.
  * <p>
  * Non-WebTransport requests are forwarded to the optional {@code fallbackHandler}. If no fallback is
@@ -61,6 +65,9 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
     private final WebTransportSessionAcceptor acceptor;
     @Nullable
     private final ChannelHandler fallbackHandler;
+    private final Queue<Http3DataFrame> pendingData = new ArrayDeque<>();
+    private boolean waitingForSettings;
+    private int pendingBytes;
 
     /**
      * Creates a new handler that accepts WebTransport sessions and returns HTTP 405 for all other requests.
@@ -86,6 +93,22 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        if (waitingForSettings) {
+            if (msg instanceof Http3DataFrame) {
+                Http3DataFrame data = (Http3DataFrame) msg;
+                if (pendingData.size() == 64 || data.content().readableBytes() > 65536 - pendingBytes) {
+                    ReferenceCountUtil.release(data);
+                    releasePendingData();
+                    ctx.close();
+                } else {
+                    pendingBytes += data.content().readableBytes();
+                    pendingData.add(data);
+                }
+            } else {
+                ReferenceCountUtil.release(msg);
+            }
+            return;
+        }
         if (!(msg instanceof Http3HeadersFrame)) {
             // Data frames or unexpected messages before headers — ignore.
             ReferenceCountUtil.release(msg);
@@ -114,14 +137,57 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         }
 
         // Validate required pseudo-headers for WebTransport CONNECT.
-        if (headers.authority() == null || headers.path() == null || headers.scheme() == null) {
+        if (headers.authority() == null || headers.authority().length() == 0
+                || headers.path() == null || headers.path().length() == 0
+                || !"https".contentEquals(headers.scheme() == null ? "" : headers.scheme())
+                || WebTransportHttp3CapsuleHandler.hasForbiddenHeaders(headers)) {
             logger.debug("stream={} WT CONNECT missing required pseudo-headers (authority={} path={} scheme={})",
                     ctx.channel(), headers.authority(), headers.path(), headers.scheme());
             sendErrorAndClose(ctx, 400);
             return;
         }
 
-        // Consult the acceptor.
+        QuicChannel parent = ((QuicStreamChannel) ctx.channel()).parent();
+        Http3ConnectionHandler connection = parent.pipeline().get(Http3ConnectionHandler.class);
+        if (connection == null) {
+            establishSession(ctx, headers);
+            return;
+        }
+        // CONNECT can arrive before the peer's control stream because QUIC streams are unordered.
+        waitingForSettings = true;
+        connection.peerSettings().addListener(future -> {
+            if (!ctx.channel().isActive()) {
+                releasePendingData();
+                return;
+            }
+            waitingForSettings = false;
+            if (!future.isSuccess() || !connection.webTransportSupported(connection.peerSettings().getNow())) {
+                releasePendingData();
+                sendErrorAndClose(ctx, 400);
+                return;
+            }
+            try {
+                establishSession(ctx, headers);
+                ChannelHandlerContext capsuleContext = ctx.pipeline().context(WebTransportHttp3CapsuleHandler.class);
+                if (capsuleContext != null) {
+                    WebTransportHttp3CapsuleHandler bridge =
+                            (WebTransportHttp3CapsuleHandler) capsuleContext.handler();
+                    Http3DataFrame frame;
+                    while ((frame = pendingData.poll()) != null) {
+                        bridge.channelRead(capsuleContext, frame);
+                    }
+                }
+            } catch (Exception cause) {
+                ctx.fireExceptionCaught(cause);
+                ctx.close();
+            } finally {
+                releasePendingData();
+            }
+        });
+    }
+
+    private void establishSession(ChannelHandlerContext ctx, Http3Headers headers) throws Exception {
+        // Consult the acceptor only once both peers have negotiated WebTransport support.
         WebTransportSessionListener listener = acceptor.accept(headers);
         if (listener == null) {
             logger.debug("stream={} acceptor rejected WT session", ctx.channel());
@@ -135,7 +201,15 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         // pseudo-header per RFC 9114 §4.3.
         Http3Headers responseHeaders = new DefaultHttp3Headers();
         responseHeaders.status("200");
-        ctx.writeAndFlush(new DefaultHttp3HeadersFrame(responseHeaders));
+        responseHeaders.set("sec-webtransport-http3-draft", "draft02");
+        ctx.writeAndFlush(new DefaultHttp3HeadersFrame(responseHeaders)).addListener(future -> {
+            if (!future.isSuccess()) {
+                ctx.close();
+            }
+        });
+        if (!ctx.channel().isActive()) {
+            return;
+        }
 
         // Establish the session.
         QuicStreamChannel streamChannel = (QuicStreamChannel) ctx.channel();
@@ -143,51 +217,47 @@ public final class WebTransportServerHandler extends ChannelInboundHandlerAdapte
         long sessionId = streamChannel.streamId();
 
         WebTransportSession session = new WebTransportSession(quicChannel, streamChannel, sessionId, listener);
-        WebTransportSessionRegistry.getOrCreate(quicChannel).register(sessionId, session);
-
-        // Rewire pipeline: replace HTTP/3 frame codec with capsule codec.
-        ChannelPipeline pipeline = ctx.pipeline();
-
-        // Remove HTTP/3 stream validators BEFORE replacing the frame codec.
-        // Http3FrameCodec extends ByteToMessageDecoder; when it is removed from the pipeline,
-        // ByteToMessageDecoder.handlerRemoved() fires any buffered decoded frames synchronously
-        // back into the pipeline via fireChannelRead().  If the validators are still present at
-        // that moment they treat those frames as unexpected and raise an Http3Exception.  Removing
-        // them first ensures the buffered frames pass through (or are released by this handler)
-        // without triggering a connection error.
-        removeIfPresent(pipeline, Http3RequestStreamEncodeStateValidator.class);
-        removeIfPresent(pipeline, Http3RequestStreamDecodeStateValidator.class);
-        removeIfPresent(pipeline, Http3RequestStreamValidationHandler.class);
-
-        // The Http3FrameCodec is always in the pipeline — get it by type.
-        ChannelHandler frameCodec = pipeline.get(Http3FrameCodec.class);
-        if (frameCodec != null) {
-            pipeline.replace(frameCodec, "wtCapsuleDecoder", new WebTransportCapsuleDecoder());
-        } else {
-            logger.debug("stream={} Http3FrameCodec NOT FOUND in pipeline during WT surgery — pipeline: {}",
-                    ctx.channel(), pipeline.names());
-        }
-
-        // Add capsule encoder at the head (outbound direction goes head→network).
-        pipeline.addFirst("wtCapsuleEncoder", WebTransportCapsuleEncoder.INSTANCE);
-
-        // Replace this handler with the capsule dispatcher. The session established
-        // user event will be fired from WebTransportSessionStreamHandler.handlerAdded().
-        pipeline.replace(this, "wtSessionStream", new WebTransportSessionStreamHandler(session));
+        WebTransportSessionRegistry registry = WebTransportSessionRegistry.getOrCreate(quicChannel);
+        WebTransportHttp3CapsuleHandler.install(ctx, session);
+        registry.register(sessionId, session);
     }
 
-    private static void removeIfPresent(ChannelPipeline pipeline, Class<? extends ChannelHandler> type) {
-        ChannelHandler h = pipeline.get(type);
-        if (h != null) {
-            pipeline.remove(h);
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) {
+        releasePendingData();
+        ctx.fireChannelInactive();
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+        if (waitingForSettings && evt instanceof ChannelInputShutdownEvent) {
+            releasePendingData();
+            ctx.close();
         }
+        ctx.fireUserEventTriggered(evt);
+    }
+
+    private void releasePendingData() {
+        Http3DataFrame frame;
+        while ((frame = pendingData.poll()) != null) {
+            frame.release();
+        }
+        pendingBytes = 0;
     }
 
     private static void sendErrorAndClose(ChannelHandlerContext ctx, int statusCode) {
         Http3Headers responseHeaders = new DefaultHttp3Headers();
         responseHeaders.status(String.valueOf(statusCode));
         ctx.writeAndFlush(new DefaultHttp3HeadersFrame(responseHeaders))
-                .addListener(f -> ctx.channel().close());
+                .addListener(future -> {
+                    QuicStreamChannel stream = (QuicStreamChannel) ctx.channel();
+                    if (future.isSuccess()) {
+                        stream.shutdownOutput();
+                        stream.shutdownInput(Http3ErrorCode.H3_NO_ERROR.code());
+                    } else {
+                        stream.close();
+                    }
+                });
     }
 
     @Override
