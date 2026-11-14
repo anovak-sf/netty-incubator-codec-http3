@@ -71,7 +71,7 @@
     <!-- Preserve the fork's module name; this is not the stock io.netty codec-http3 artifact. -->
     <javaModuleName>io.netty.incubator.codec.http3</javaModuleName>
     <skipTests>false</skipTests>
-    <netty.version>4.2.17.Final</netty.version>
+    <netty.version>4.2.20.Final</netty.version>
     <netty.upstream.url>https://github.com/netty/netty/tree/netty-${netty.version}/codec-http3</netty.upstream.url>
     <netty.build.version>31</netty.build.version>
     <junit.version>5.14.3</junit.version>

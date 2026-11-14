@@ -2,14 +2,14 @@
 HTTP/3 and WebTransport fork using the maintained [Netty 4.2 QUIC codec](https://netty.io/4.2/api/io/netty/handler/codec/quic/package-summary.html).
 
 The HTTP/3 implementation and regression tests incorporate the changes from
-[Netty 4.2.17.Final](https://github.com/netty/netty/tree/netty-4.2.17.Final/codec-http3),
+[Netty 4.2.20.Final](https://github.com/netty/netty/tree/netty-4.2.20.Final/codec-http3),
 merged against this fork's upstream baseline `78b7bea`, while retaining the custom
 WebTransport implementation and its fixes. The artifact is
 `io.netty.incubator:netty-incubator-codec-http3:0.0.33.0.wtransport-netty42-SNAPSHOT`.
 
 The HTTP/3 package remains `io.netty.incubator.codec.http3`. Applications must update QUIC
 imports to `io.netty.handler.codec.quic` and align their unshaded Netty dependencies to
-**4.2.17.Final**, including the matching native QUIC artifacts. Use `io.netty:netty-bom`
+**4.2.20.Final**, including the matching native QUIC artifacts. Use `io.netty:netty-bom`
 for version alignment. Upstream defaults now limit header field sections to 8 KiB and
 buffered unknown frame payloads to 32 KiB; configure larger limits explicitly when required.
 The minimum Java version remains 8. This dependency migration does not implement draft-16.
