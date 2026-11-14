@@ -18,17 +18,22 @@ package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.Collection;
+import java.util.function.BiConsumer;
 
-import static io.netty.incubator.codec.http3.Http3SettingsFrame.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY;
+import static io.netty.incubator.codec.http3.Http3SettingIdentifier.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY;
 import static io.netty.incubator.codec.http3.QpackDecoderStateSyncStrategy.ackEachInsert;
 import static io.netty.incubator.codec.http3.QpackUtil.MAX_UNSIGNED_INT;
 import static java.lang.Math.toIntExact;
 import static java.util.Arrays.asList;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class QpackDecoderTest {
@@ -113,24 +118,105 @@ public class QpackDecoderTest {
         verifyField(entry, insertionCount - 1);
     }
 
+    @Test
+    public void zeroMaxBlockedStreamsThrowsOnBlockedStream() throws Exception {
+        setup(128);
+        ByteBuf in = encodeBlockingFrame(1);
+        try {
+            assertThrows(QpackException.class,
+                    () -> decoder.decode(attributes, 0L, in, in.readableBytes(), (n, v) -> { }, () -> { }));
+        } finally {
+            in.release();
+        }
+    }
+
+    @Test
+    public void maxBlockedStreamsLimitEnforced() throws Exception {
+        int maxBlockedStreams = 3;
+        setup(128, maxBlockedStreams);
+        BiConsumer<CharSequence, CharSequence> sink = (n, v) -> { };
+
+        for (long streamId = 0; streamId < maxBlockedStreams; streamId++) {
+            ByteBuf in = encodeBlockingFrame(1);
+            try {
+                assertFalse(decoder.decode(attributes, streamId, in, in.readableBytes(), sink, () -> { }),
+                        "Stream " + streamId + " should be blocked");
+            } finally {
+                in.release();
+            }
+        }
+
+        ByteBuf overflow = encodeBlockingFrame(1);
+        try {
+            assertThrows(QpackException.class,
+                    () -> decoder.decode(attributes, 99L, overflow, overflow.readableBytes(), sink, () -> { }));
+        } finally {
+            overflow.release();
+        }
+    }
+
+    @Test
+    public void blockedStreamsCountReleasedAfterUnblocking() throws Exception {
+        int maxBlockedStreams = 2;
+        setup(128, maxBlockedStreams);
+        BiConsumer<CharSequence, CharSequence> sink = (n, v) -> { };
+
+        for (long streamId = 0; streamId < maxBlockedStreams; streamId++) {
+            ByteBuf in = encodeBlockingFrame(1);
+            try {
+                assertFalse(decoder.decode(attributes, streamId, in, in.readableBytes(), sink, () -> { }),
+                        "Stream " + streamId + " should be blocked");
+            } finally {
+                in.release();
+            }
+        }
+
+        insertLiterals(1);
+
+        for (long streamId = 100; streamId < 100 + maxBlockedStreams; streamId++) {
+            ByteBuf in = encodeBlockingFrame(2);
+            try {
+                assertFalse(decoder.decode(attributes, streamId, in, in.readableBytes(), sink, () -> { }),
+                        "Stream " + streamId + " should be blocked after counter was released");
+            } finally {
+                in.release();
+            }
+        }
+    }
+
+    /**
+     * Encodes a 2-byte QPACK header block prefix (Required Insert Count + Base) that will cause
+     * a stream to block until the dynamic table reaches {@code requiredInsertCount}.
+     */
+    private ByteBuf encodeBlockingFrame(int requiredInsertCount) {
+        ByteBuf buf = Unpooled.buffer(2);
+        QpackUtil.encodePrefixedInteger(buf, (byte) 0b0, 8, requiredInsertCount % (2L * maxEntries) + 1);
+        QpackUtil.encodePrefixedInteger(buf, (byte) 0b0, 7, 0);
+        return buf;
+    }
+
     private void setup(long capacity) throws QpackException {
+        setup(capacity, 0);
+    }
+
+    private void setup(long capacity, int maxBlockedStreams) throws QpackException {
         long maxTableCapacity = MAX_UNSIGNED_INT;
         inserted = 0;
         this.maxEntries = toIntExact(QpackUtil.maxEntries(maxTableCapacity));
-        final DefaultHttp3SettingsFrame settings = new DefaultHttp3SettingsFrame();
-        settings.put(HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, maxTableCapacity);
+        final DefaultHttp3SettingsFrame settingsFrame = new DefaultHttp3SettingsFrame();
+        settingsFrame.settings().put(HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY.id(), maxTableCapacity);
         table = new QpackDecoderDynamicTable();
         EmbeddedQuicChannel parent = new EmbeddedQuicChannel(true);
         attributes = new QpackAttributes(parent, false);
         decoderStream = new EmbeddedQuicStreamChannel();
         attributes.decoderStream(decoderStream);
-        decoder = new QpackDecoder(maxTableCapacity, 0, table, ackEachInsert());
+        decoder = new QpackDecoder(maxTableCapacity, maxBlockedStreams, table, ackEachInsert());
         decoder.setDynamicTableCapacity(capacity);
     }
 
     private void encodeDecodeVerifyRequiredInsertCount(int count) throws QpackException {
         final int ric = encodeDecodeRequiredInsertCount(count);
-        assertEquals(count, ric);
+        assertThat(ric, is(count));
     }
 
     private int encodeDecodeDeltaBase(int requiredInsertCount, boolean postBase, int deltaBase) throws QpackException {
@@ -158,11 +244,11 @@ public class QpackDecoderTest {
             inserted++;
             decoder.insertLiteral(decoderStream, FOO + i, BAR + i);
         }
-        assertEquals(count > 0, decoderStream.finishAndReleaseAll());
+        assertThat(decoderStream.finishAndReleaseAll(), is(count > 0));
     }
 
     private void verifyField(QpackHeaderField field, int fieldIndexWhenInserted) {
-        assertEquals(FOO + fieldIndexWhenInserted, field.name);
-        assertEquals(BAR + fieldIndexWhenInserted, field.value);
+        assertThat(field.name, is(FOO + fieldIndexWhenInserted));
+        assertThat(field.value, is(BAR + fieldIndexWhenInserted));
     }
 }

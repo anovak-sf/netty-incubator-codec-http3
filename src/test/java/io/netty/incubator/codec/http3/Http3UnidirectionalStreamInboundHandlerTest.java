@@ -22,8 +22,8 @@ import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.DefaultChannelId;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.ReferenceCountUtil;
 import org.jetbrains.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -52,7 +52,7 @@ public class Http3UnidirectionalStreamInboundHandlerTest {
 
     private void setup(boolean server) {
         parent = new EmbeddedQuicChannel(server);
-        qpackEncoder = new QpackEncoder();
+        qpackEncoder = new QpackEncoder(QpackSensitivityDetector.NEVER_SENSITIVE);
         qpackDecoder = new QpackDecoder(0, 0);
         localControlStreamHandler = new Http3ControlStreamInboundHandler(server, null, qpackEncoder,
                 remoteControlStreamHandler);
@@ -108,6 +108,38 @@ public class Http3UnidirectionalStreamInboundHandlerTest {
 
         Http3TestUtils.assertBufferEquals(someBuffer, channel.readInbound());
         assertNull(channel.readInbound());
+    }
+
+    @ParameterizedTest(name = "{index}: server = {0}")
+    @ValueSource(booleans = {false, true})
+    public void testWebTransportTypeIsUnknownWhenDisabled(boolean server) throws Exception {
+        setup(server);
+        EmbeddedChannel channel = newChannel(server, type -> {
+            assertEquals(WebTransportCodecUtils.WT_STREAM_TYPE_UNIDIRECTIONAL, type);
+            return Http3UnidirectionalStreamInboundHandler.ReleaseHandler.INSTANCE;
+        });
+        ByteBuf buffer = Unpooled.buffer();
+        Http3CodecUtils.writeVariableLengthInteger(buffer, WebTransportCodecUtils.WT_STREAM_TYPE_UNIDIRECTIONAL);
+        assertFalse(channel.writeInbound(buffer));
+        assertNull(channel.pipeline().context(Http3UnidirectionalStreamInboundHandler.class));
+        assertTrue(parent.isActive());
+        assertFalse(channel.finish());
+    }
+
+    @ParameterizedTest(name = "{index}: server = {0}")
+    @ValueSource(booleans = {false, true})
+    public void testFragmentedPushStreamPrefix(boolean server) throws Exception {
+        setup(server);
+        EmbeddedChannel channel = newChannel(server);
+        assertFalse(channel.writeInbound(Unpooled.buffer(1, 1).writeByte(HTTP3_PUSH_STREAM_TYPE)));
+        assertNotNull(channel.pipeline().context(Http3UnidirectionalStreamInboundHandler.class));
+        // A two-byte push ID split between separate reads must not be mistaken for a new stream type.
+        assertFalse(channel.writeInbound(Unpooled.buffer(1, 1).writeByte(0x40)));
+        assertNotNull(channel.pipeline().context(Http3UnidirectionalStreamInboundHandler.class));
+        assertFalse(channel.writeInbound(Unpooled.buffer(1, 1).writeByte(0x40)));
+        Http3TestUtils.verifyClose(server ? Http3ErrorCode.H3_STREAM_CREATION_ERROR : Http3ErrorCode.H3_ID_ERROR,
+                parent);
+        assertFalse(channel.finish());
     }
 
     @ParameterizedTest(name = "{index}: server = {0}")

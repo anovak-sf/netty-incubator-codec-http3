@@ -16,18 +16,31 @@
 package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.handler.codec.quic.QuicDatagramExtensionEvent;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
+import org.hamcrest.CoreMatchers;
+import org.hamcrest.MatcherAssert;
+
+import java.lang.reflect.Constructor;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 final class Http3TestUtils {
 
     private Http3TestUtils() { }
 
+    static QuicDatagramExtensionEvent datagramExtensionEvent() throws ReflectiveOperationException {
+        // QUIC creates this event internally; its constructor is package-private.
+        Constructor<QuicDatagramExtensionEvent> constructor =
+                QuicDatagramExtensionEvent.class.getDeclaredConstructor(int.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(1200);
+    }
+
     static void assertException(Http3ErrorCode code, Throwable e) {
-        assertInstanceOf(Http3Exception.class, e);
+        MatcherAssert.assertThat(e, CoreMatchers.instanceOf(Http3Exception.class));
         Http3Exception exception = (Http3Exception) e;
         assertEquals(code, exception.errorCode());
     }

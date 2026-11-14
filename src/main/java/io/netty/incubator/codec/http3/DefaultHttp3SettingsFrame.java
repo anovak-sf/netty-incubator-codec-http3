@@ -15,15 +15,17 @@
  */
 package io.netty.incubator.codec.http3;
 
-import io.netty.util.collection.LongObjectHashMap;
-import io.netty.util.collection.LongObjectMap;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.StringUtil;
+import org.jetbrains.annotations.Nullable;
 
-import javax.annotation.Nullable;
 import java.util.Iterator;
 import java.util.Map;
 
+/**
+ * Default implementation of {@link Http3SettingsFrame}.
+ *
+ */
 public final class DefaultHttp3SettingsFrame implements Http3SettingsFrame {
 
     private final Http3Settings settings;
@@ -74,7 +76,7 @@ public final class DefaultHttp3SettingsFrame implements Http3SettingsFrame {
 
     @Override
     public Iterator<Map.Entry<Long, Long>> iterator() {
-        return settings.iterator();
+       return settings.iterator();
     }
 
     @Override

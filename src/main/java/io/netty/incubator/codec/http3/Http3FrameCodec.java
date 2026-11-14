@@ -23,8 +23,8 @@ import io.netty.channel.ChannelOutboundHandler;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.PendingWriteQueue;
 import io.netty.handler.codec.ByteToMessageDecoder;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamFrame;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamFrame;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -63,12 +63,12 @@ final class Http3FrameCodec extends ByteToMessageDecoder implements ChannelOutbo
 
     private final Http3FrameTypeValidator validator;
     private final long maxHeaderListSize;
+    private final int maxUnknownFramePayloadLength;
     private final QpackDecoder qpackDecoder;
     private final QpackEncoder qpackEncoder;
     private final Http3RequestStreamCodecState encodeState;
     private final Http3RequestStreamCodecState decodeState;
     private final Http3Settings.NonStandardHttp3SettingsValidator nonStandardSettingsValidator;
-
     private boolean firstFrame = true;
     private boolean error;
     private long type = -1;
@@ -78,23 +78,29 @@ final class Http3FrameCodec extends ByteToMessageDecoder implements ChannelOutbo
     private WriteResumptionListener writeResumptionListener;
 
     static Http3FrameCodecFactory newFactory(QpackDecoder qpackDecoder,
-                                             long maxHeaderListSize, QpackEncoder qpackEncoder) {
+                                             long maxHeaderListSize, int maxUnknownFramePayloadLength,
+                                             QpackEncoder qpackEncoder) {
         checkNotNull(qpackEncoder, "qpackEncoder");
         checkNotNull(qpackDecoder, "qpackDecoder");
+        checkPositive(maxHeaderListSize, "maxHeaderListSize");
+        checkPositive(maxUnknownFramePayloadLength, "maxUnknownFramePayloadLength");
 
         // QPACK decoder and encoder are shared between streams in a connection.
         return (validator, encodeState, decodeState,
                 nonStandardSettingsValidator) -> new Http3FrameCodec(validator, qpackDecoder,
-                maxHeaderListSize, qpackEncoder, encodeState, decodeState, nonStandardSettingsValidator);
+                maxHeaderListSize, maxUnknownFramePayloadLength, qpackEncoder,
+                encodeState, decodeState, nonStandardSettingsValidator);
     }
 
     Http3FrameCodec(Http3FrameTypeValidator validator, QpackDecoder qpackDecoder,
-                    long maxHeaderListSize, QpackEncoder qpackEncoder, Http3RequestStreamCodecState encodeState,
+                    long maxHeaderListSize, int maxUnknownFramePayloadLength,
+                    QpackEncoder qpackEncoder, Http3RequestStreamCodecState encodeState,
                     Http3RequestStreamCodecState decodeState,
                     Http3Settings.NonStandardHttp3SettingsValidator nonStandardSettingsValidator) {
         this.validator = checkNotNull(validator, "validator");
         this.qpackDecoder = checkNotNull(qpackDecoder, "qpackDecoder");
         this.maxHeaderListSize = checkPositive(maxHeaderListSize, "maxHeaderListSize");
+        this.maxUnknownFramePayloadLength = checkPositive(maxUnknownFramePayloadLength, "maxUnknownFramePayloadLength");
         this.qpackEncoder = checkNotNull(qpackEncoder, "qpackEncoder");
         this.encodeState = checkNotNull(encodeState, "encodeState");
         this.decodeState = checkNotNull(decodeState, "decodeState");
@@ -174,6 +180,14 @@ final class Http3FrameCodec extends ByteToMessageDecoder implements ChannelOutbo
                 return;
             }
             long localType = readVariableLengthInteger(in, typeLen);
+            if (localType == WebTransportCodecUtils.WT_STREAM_TYPE_BIDIRECTIONAL) {
+                // The detector consumes WT_STREAM only at the start of a bidirectional stream.
+                // Anywhere in an HTTP/3 frame sequence it is forbidden, and has no length field.
+                // See draft-ietf-webtrans-http3, Section 4.2.
+                connectionError(ctx, Http3ErrorCode.H3_FRAME_ERROR,
+                        "WT_STREAM is only permitted as the initial WebTransport stream prefix.", true);
+                return;
+            }
             if (Http3CodecUtils.isReservedHttp2FrameType(localType)) {
                 // See https://tools.ietf.org/html/draft-ietf-quic-http-32#section-7.2.8
                 // Debug: capture stream context to diagnose spurious reserved-type errors after WT pipeline surgery.
@@ -242,8 +256,9 @@ final class Http3FrameCodec extends ByteToMessageDecoder implements ChannelOutbo
     }
 
     private static int skipBytes(ByteBuf in, int payLoadLength) {
-        in.skipBytes(payLoadLength);
-        return payLoadLength;
+        int length = Math.min(in.readableBytes(), payLoadLength);
+        in.skipBytes(length);
+        return length;
     }
 
     private int decodeFrame(ChannelHandlerContext ctx, long longType, int payLoadLength, ByteBuf in, List<Object> out) {
@@ -363,7 +378,8 @@ final class Http3FrameCodec extends ByteToMessageDecoder implements ChannelOutbo
                 }
                 // Handling reserved frame types
                 // https://tools.ietf.org/html/draft-ietf-quic-http-32#section-7.2.8
-                if (in.readableBytes() < payLoadLength) {
+                if (!enforceMaxPayloadLength(ctx, in, type, payLoadLength,
+                        maxUnknownFramePayloadLength, Http3ErrorCode.H3_EXCESSIVE_LOAD)) {
                     return 0;
                 }
                 out.add(new DefaultHttp3UnknownFrame(longType, in.readRetainedSlice(payLoadLength)));

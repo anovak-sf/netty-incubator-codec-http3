@@ -20,7 +20,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -29,7 +29,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.Arrays;
 import java.util.List;
 
-import static io.netty.incubator.codec.http3.Http3TestUtils.*;
+import static io.netty.incubator.codec.http3.Http3TestUtils.assertException;
+import static io.netty.incubator.codec.http3.Http3TestUtils.verifyClose;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;

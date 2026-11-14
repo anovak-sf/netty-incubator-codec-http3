@@ -15,13 +15,12 @@
  */
 package io.netty.incubator.codec.http3;
 
-import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
+import io.netty.channel.socket.ChannelInputShutdownEvent;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.ObjectUtil;
 
@@ -32,15 +31,13 @@ import io.netty.util.internal.ObjectUtil;
  * {@link Http3#newWebTransportSession}. It:
  * <ol>
  *   <li>Writes the Extended CONNECT {@link Http3HeadersFrame} when the stream becomes active.</li>
- *   <li>Awaits a 2xx response with {@code :protocol: webtransport}.</li>
- *   <li>On success, rewires the pipeline to the RFC 9297 capsule protocol, creates a
+ *   <li>Awaits a successful final response.</li>
+ *   <li>On success, enables the RFC 9297 capsule protocol over HTTP/3 DATA frames, creates a
  *       {@link WebTransportSession}, and completes the provided {@link ChannelPromise}.</li>
  *   <li>On failure, closes the stream and fails the promise.</li>
  * </ol>
  */
 final class WebTransportClientSessionHandler extends ChannelInboundHandlerAdapter {
-
-    private static final String WT_PROTOCOL = "webtransport";
 
     private final Http3Headers connectHeaders;
     private final WebTransportSessionListener listener;
@@ -49,7 +46,11 @@ final class WebTransportClientSessionHandler extends ChannelInboundHandlerAdapte
     WebTransportClientSessionHandler(Http3Headers connectHeaders,
                                      WebTransportSessionListener listener,
                                      ChannelPromise sessionPromise) {
-        this.connectHeaders = ObjectUtil.checkNotNull(connectHeaders, "connectHeaders");
+        // Legacy draft negotiation uses this header in addition to SETTINGS_ENABLE_WEBTRANSPORT.
+        // Copy before adding it: callers may reuse their request headers.
+        this.connectHeaders = new DefaultHttp3Headers()
+                .set(ObjectUtil.checkNotNull(connectHeaders, "connectHeaders"))
+                .set("sec-webtransport-http3-draft02", "1");
         this.listener = ObjectUtil.checkNotNull(listener, "listener");
         this.sessionPromise = ObjectUtil.checkNotNull(sessionPromise, "sessionPromise");
     }
@@ -57,7 +58,11 @@ final class WebTransportClientSessionHandler extends ChannelInboundHandlerAdapte
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         // Send the Extended CONNECT request immediately on stream activation.
-        ctx.writeAndFlush(new DefaultHttp3HeadersFrame(connectHeaders));
+        ctx.writeAndFlush(new DefaultHttp3HeadersFrame(connectHeaders)).addListener(future -> {
+            if (!future.isSuccess()) {
+                failAndClose(ctx, future.cause());
+            }
+        });
         ctx.fireChannelActive();
     }
 
@@ -74,28 +79,38 @@ final class WebTransportClientSessionHandler extends ChannelInboundHandlerAdapte
 
         CharSequence status = headers.status();
         if (status == null) {
-            failAndClose(ctx, new IllegalStateException("Response missing :status pseudo-header"));
+            failAndClose(ctx, new Http3Exception(Http3ErrorCode.H3_MESSAGE_ERROR,
+                    "Response missing :status pseudo-header"));
             return;
         }
 
-        int statusCode;
-        try {
-            statusCode = Integer.parseInt(status.toString());
-        } catch (NumberFormatException e) {
-            failAndClose(ctx, new IllegalStateException("Invalid :status value: " + status));
+        if (status.length() != 3 || status.charAt(0) < '1' || status.charAt(0) > '5'
+                || status.charAt(1) < '0' || status.charAt(1) > '9'
+                || status.charAt(2) < '0' || status.charAt(2) > '9') {
+            failAndClose(ctx, new Http3Exception(Http3ErrorCode.H3_MESSAGE_ERROR,
+                    "Invalid :status value: " + status));
             return;
         }
-
-        if (statusCode < 200 || statusCode >= 300) {
+        int statusCode = Integer.parseInt(status.toString());
+        if (statusCode == 101) {
+            failAndClose(ctx, new Http3Exception(Http3ErrorCode.H3_MESSAGE_ERROR,
+                    "Invalid :status value: " + status));
+            return;
+        }
+        if (statusCode < 200) {
+            // Informational responses do not decide whether the CONNECT request succeeds.
+            return;
+        }
+        if (statusCode >= 300) {
             failAndClose(ctx, new IllegalStateException(
                     "WebTransport session rejected with status " + statusCode));
             return;
         }
 
-        CharSequence protocol = headers.get(Http3Headers.PseudoHeaderName.PROTOCOL.value());
-        if (!WT_PROTOCOL.equals(protocol == null ? null : protocol.toString())) {
-            failAndClose(ctx, new IllegalStateException(
-                    "Server did not echo :protocol: webtransport in 2xx response"));
+        if (statusCode == 204 || statusCode == 205 || statusCode == 206
+                || WebTransportHttp3CapsuleHandler.hasForbiddenHeaders(headers)) {
+            failAndClose(ctx, new Http3Exception(Http3ErrorCode.H3_MESSAGE_ERROR,
+                    "Response is not valid for the Capsule Protocol"));
             return;
         }
 
@@ -105,24 +120,12 @@ final class WebTransportClientSessionHandler extends ChannelInboundHandlerAdapte
         long sessionId = streamChannel.streamId();
 
         WebTransportSession session = new WebTransportSession(quicChannel, streamChannel, sessionId, listener);
-        WebTransportSessionRegistry.getOrCreate(quicChannel).register(sessionId, session);
-
-        ChannelPipeline pipeline = ctx.pipeline();
-
-        ChannelHandler frameCodec = pipeline.get(Http3FrameCodec.class);
-        if (frameCodec != null) {
-            pipeline.replace(frameCodec, "wtCapsuleDecoder", new WebTransportCapsuleDecoder());
-        }
-        pipeline.addFirst("wtCapsuleEncoder", WebTransportCapsuleEncoder.INSTANCE);
-
-        removeIfPresent(pipeline, Http3RequestStreamEncodeStateValidator.class);
-        removeIfPresent(pipeline, Http3RequestStreamDecodeStateValidator.class);
-        removeIfPresent(pipeline, Http3RequestStreamValidationHandler.class);
-
-        pipeline.replace(this, "wtSessionStream", new WebTransportSessionStreamHandler(session));
+        WebTransportSessionRegistry registry = WebTransportSessionRegistry.getOrCreate(quicChannel);
+        WebTransportHttp3CapsuleHandler.install(ctx, session);
+        registry.register(sessionId, session);
 
         // Notify the caller that the session is ready.
-        sessionPromise.setSuccess();
+        sessionPromise.trySuccess();
     }
 
     @Override
@@ -139,18 +142,23 @@ final class WebTransportClientSessionHandler extends ChannelInboundHandlerAdapte
         failAndClose(ctx, cause);
     }
 
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+        if (evt instanceof ChannelInputShutdownEvent) {
+            failAndClose(ctx, new IllegalStateException(
+                    "WebTransport session response ended before session was established"));
+        }
+        ctx.fireUserEventTriggered(evt);
+    }
+
     private void failAndClose(ChannelHandlerContext ctx, Throwable cause) {
         if (!sessionPromise.isDone()) {
             sessionPromise.setFailure(cause);
         }
-        ctx.close();
-    }
-
-    private static void removeIfPresent(ChannelPipeline pipeline, Class<? extends ChannelHandler> type) {
-        ChannelHandler h = pipeline.get(type);
-        if (h != null) {
-            pipeline.remove(h);
+        if (cause instanceof Http3Exception) {
+            ((QuicStreamChannel) ctx.channel()).shutdown(((Http3Exception) cause).errorCode().code());
         }
+        ctx.close();
     }
 
     @Override

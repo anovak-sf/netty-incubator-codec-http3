@@ -16,13 +16,11 @@
 package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.CompositeByteBuf;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.MessageToByteEncoder;
 import io.netty.util.CharsetUtil;
 
-import static io.netty.incubator.codec.http3.Http3CodecUtils.numBytesForVariableLengthInteger;
 import static io.netty.incubator.codec.http3.Http3CodecUtils.writeVariableLengthInteger;
 
 /**

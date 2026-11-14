@@ -19,7 +19,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
 import io.netty.handler.codec.ByteToMessageDecoder;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.AsciiString;
 import org.jetbrains.annotations.Nullable;
 
@@ -32,7 +32,9 @@ import static io.netty.incubator.codec.http3.QpackUtil.decodePrefixedIntegerAsIn
 import static io.netty.util.internal.ObjectUtil.checkInRange;
 
 final class QpackEncoderHandler extends ByteToMessageDecoder {
-
+    private static final QpackException INVALID_LENGTH_STRING_LITERAL =
+            QpackException.newStatic(QpackEncoderHandler.class, "decodeStringLiteral(...)",
+                    "QPACK - invalid length for STRING_LITERAL");
     private final QpackHuffmanDecoder huffmanDecoder;
     private final QpackDecoder qpackDecoder;
     private boolean discard;
@@ -239,6 +241,9 @@ final class QpackEncoderHandler extends ByteToMessageDecoder {
             throws QpackException {
         if (huffmanEncoded) {
             return huffmanDecoder.decode(in, length);
+        }
+        if (in.readableBytes() < length) {
+            throw INVALID_LENGTH_STRING_LITERAL;
         }
         byte[] buf = new byte[length];
         in.readBytes(buf);

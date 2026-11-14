@@ -48,7 +48,7 @@ public class Http3SettingsTest {
         assertEquals(0L, settings.qpackMaxTableCapacity());
         assertEquals(0L, settings.qpackBlockedStreams());
         assertEquals(Boolean.FALSE, settings.connectProtocolEnabled());
-        assertEquals(16 * 1024 * 1024, settings.maxFieldSectionSize());
+        assertEquals(Http3CodecUtils.DEFAULT_MAX_FIELD_SECTION_SIZE, settings.maxFieldSectionSize());
         assertEquals(Boolean.FALSE, settings.h3DatagramEnabled());
     }
 
@@ -104,6 +104,28 @@ public class Http3SettingsTest {
             count.incrementAndGet();
         }
         assertTrue(count.get() == 2);
+    }
+
+    @Test
+    void testDefaultGet() {
+        Http3Settings settings = new Http3Settings();
+
+        assertNull(settings.get(Http3SettingIdentifier.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE.id()));
+
+        assertEquals(Long.MAX_VALUE, settings
+                .getOrDefault(
+                        Http3SettingIdentifier.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE.id(),
+                        Long.MAX_VALUE)
+        );
+        assertEquals(Long.MIN_VALUE, settings
+                .getOrDefault(
+                        Http3SettingIdentifier.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE.id(),
+                        Long.MIN_VALUE)
+        );
+
+        assertNull(settings.put(Http3SettingIdentifier.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE.id(), 1000L));
+
+        assertEquals(1000L, settings.get(Http3SettingIdentifier.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE.id()));
     }
 
     @Test
@@ -188,6 +210,38 @@ public class Http3SettingsTest {
     }
 
     @Test
+    void testCustomSettingsNotIgnoredWithValidator() {
+        long customKey = 0xdeadbeefL;
+        Http3Settings settings = new Http3Settings((id, v) -> customKey == id);
+        settings.put(customKey, 123L);
+        assertNotNull(settings.get(customKey));
+    }
+
+    @Test
+    void testCustomSettingsValidatorAllowsAndRejectsMultipleKeys() {
+        Set<Long> allowedKeys = new HashSet<>(Arrays.asList(
+                0xdeadbeefL,
+                0xcafebabeL
+        ));
+
+        long rejectedKey = 0xfeedfaceL;
+
+        Http3Settings settings = new Http3Settings(
+                (id, v) -> allowedKeys.contains(id)
+        );
+
+        // Allowed keys
+        allowedKeys.forEach(key -> {
+            settings.put(key, 1L);
+            assertNotNull(settings.get(key));
+        });
+
+        // Rejected key
+        settings.put(rejectedKey, 1L);
+        assertNull(settings.get(rejectedKey));
+    }
+
+    @Test
     void testDefaultSettingsBuilderPattern() {
         Http3Settings s = new Http3Settings()
                 .qpackMaxTableCapacity(10)
@@ -220,38 +274,6 @@ public class Http3SettingsTest {
         Http3Settings s1 = new Http3Settings();
         Http3Settings s2 = new Http3Settings();
         assertEquals(s1, s2);
-    }
-
-    @Test
-    void testCustomSettingsNotIgnoredWithValidator() {
-        long customKey = 0xdeadbeefL;
-        Http3Settings settings = new Http3Settings((id, v) -> customKey == id);
-        settings.put(customKey, 123L);
-        assertNotNull(settings.get(customKey));
-    }
-
-    @Test
-    void testCustomSettingsValidatorAllowsAndRejectsMultipleKeys() {
-        Set<Long> allowedKeys = new HashSet<>(Arrays.asList(
-                0xdeadbeefL,
-                0xcafebabeL
-        ));
-
-        long rejectedKey = 0xfeedfaceL;
-
-        Http3Settings settings = new Http3Settings(
-                (id, v) -> allowedKeys.contains(id)
-        );
-
-        // Allowed keys
-        allowedKeys.forEach(key -> {
-            settings.put(key, 1L);
-            assertNotNull(settings.get(key));
-        });
-
-        // Rejected key
-        settings.put(rejectedKey, 1L);
-        assertNull(settings.get(rejectedKey));
     }
 
     @Test

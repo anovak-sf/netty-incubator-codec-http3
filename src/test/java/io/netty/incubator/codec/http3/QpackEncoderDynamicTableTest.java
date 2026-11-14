@@ -19,7 +19,10 @@ import org.junit.jupiter.api.Test;
 
 import static io.netty.incubator.codec.http3.QpackUtil.MAX_HEADER_TABLE_SIZE;
 import static java.lang.Math.toIntExact;
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThan;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -36,7 +39,8 @@ public class QpackEncoderDynamicTableTest {
     public void zeroCapacityIsAllowed() throws Exception {
         QpackEncoderDynamicTable table = newDynamicTable(0);
 
-        assertThat(addHeader(table, emptyHeader)).isLessThan(0);
+        assertThat("Header addition passed.", addHeader(table, emptyHeader),
+                lessThan(0));
     }
 
     @Test
@@ -63,16 +67,16 @@ public class QpackEncoderDynamicTableTest {
         addAndValidateHeader(table, fooBarHeader);
         final int idx2 = addAndValidateHeader(table, fooBar2Header);
 
-        assertThat(addHeader(table, fooBarHeader)).isLessThan(0);
+        assertThat("Header addition passed.", addHeader(table, fooBarHeader), lessThan(0));
 
         table.incrementKnownReceivedCount(3);
-        assertThat(getEntryIndex(table, emptyHeader)).isLessThan(0);
-        assertThat(getEntryIndex(table, fooBarHeader)).isLessThan(0);
-        assertEquals(idx2, getEntryIndex(table, fooBar2Header));
+        assertThat("Unexpected entry index.", getEntryIndex(table, emptyHeader), lessThan(0));
+        assertThat("Unexpected entry index.", getEntryIndex(table, fooBarHeader), lessThan(0));
+        assertThat("Unexpected entry index.", getEntryIndex(table, fooBar2Header), is(idx2));
 
         final int idx1 = addAndValidateHeader(table, emptyHeader);
-        assertEquals(idx1, getEntryIndex(table, emptyHeader));
-        assertThat(getEntryIndex(table, fooBar2Header)).isLessThan(0);
+        assertThat("Unexpected entry index.", getEntryIndex(table, emptyHeader), is(idx1));
+        assertThat("Unexpected entry index.", getEntryIndex(table, fooBar2Header), lessThan(0));
     }
 
     @Test
@@ -81,12 +85,13 @@ public class QpackEncoderDynamicTableTest {
 
         final int idx1 = addValidateAndAckHeader(table, emptyHeader);
         assertEquals(0, idx1);
-        assertEquals(idx1, getEntryIndex(table, emptyHeader));
+        assertThat("Unexpected entry index.", getEntryIndex(table, emptyHeader), is(idx1));
 
         final int idx2 = addValidateAndAckHeader(table, fooBarHeader);
         assertEquals(1, idx2);
-        assertEquals(idx2, getEntryIndex(table, fooBarHeader));
-        assertEquals(idx1, getEntryIndex(table, emptyHeader));
+        assertThat("Unexpected entry index.", getEntryIndex(table, fooBarHeader), is(idx2));
+
+        assertThat("Unexpected entry index.", getEntryIndex(table, emptyHeader), is(idx1));
     }
 
     @Test
@@ -96,8 +101,8 @@ public class QpackEncoderDynamicTableTest {
         final int lastIdx = addValidateAndAckHeader(table, fooBar2Header);
 
         final int idx = table.getEntryIndex("foo", "baz");
-        assertThat(idx).isLessThan(0);
-        assertEquals(-lastIdx - 1, idx);
+        assertThat("Unexpected index.", idx, lessThan(0));
+        assertThat("Unexpected index.", idx, is(-lastIdx - 1));
     }
 
     @Test
@@ -105,14 +110,14 @@ public class QpackEncoderDynamicTableTest {
         QpackEncoderDynamicTable table = newDynamicTable(128);
 
         final int idx1 = addValidateAndAckHeader(table, emptyHeader);
-        assertEquals(idx1, getEntryIndex(table, emptyHeader));
+        assertThat("Unexpected entry index.", getEntryIndex(table, emptyHeader), is(idx1));
 
         final int idx2 = addValidateAndAckHeader(table, fooBarHeader);
-        assertEquals(idx2, getEntryIndex(table, fooBarHeader));
+        assertThat("Unexpected entry index.", getEntryIndex(table, fooBarHeader), is(idx2));
 
         final int idx3 = addValidateAndAckHeader(table, emptyHeader);
         // Return the most recent entry
-        assertEquals(idx3, getEntryIndex(table, emptyHeader));
+        assertThat("Unexpected entry index.", getEntryIndex(table, emptyHeader), is(idx3));
     }
 
     @Test
@@ -124,9 +129,9 @@ public class QpackEncoderDynamicTableTest {
 
         addValidateAndAckHeader(table, fooBar3Header); // size = 116, exceeds max threshold, should evict eldest
 
-        assertThat(getEntryIndex(table, fooBarHeader)).isLessThan(0);
-        assertThat(getEntryIndex(table, fooBar2Header)).isGreaterThanOrEqualTo(0);
-        assertThat(getEntryIndex(table, fooBar3Header)).isGreaterThanOrEqualTo(0);
+        assertThat("Entry found.", getEntryIndex(table, fooBarHeader), lessThan(0));
+        assertThat("Entry not found.", getEntryIndex(table, fooBar2Header), greaterThanOrEqualTo(0));
+        assertThat("Entry not found.", getEntryIndex(table, fooBar3Header), greaterThanOrEqualTo(0));
     }
 
     @Test
@@ -158,7 +163,7 @@ public class QpackEncoderDynamicTableTest {
         table.addReferenceToEntry(fooBarHeader.name, fooBarHeader.value, idx);
         table.acknowledgeInsertCountOnAck(idx);
 
-        assertEquals(2, table.encodedKnownReceivedCount());
+        assertThat("Unexpected known received count.", table.encodedKnownReceivedCount(), is(2));
     }
 
     @Test
@@ -172,10 +177,10 @@ public class QpackEncoderDynamicTableTest {
         table.addReferenceToEntry(fooBarHeader.name, fooBarHeader.value, idx2);
 
         table.acknowledgeInsertCountOnAck(idx2);
-        assertEquals(3, table.encodedKnownReceivedCount());
+        assertThat("Unexpected known received count.", table.encodedKnownReceivedCount(), is(3));
 
         table.acknowledgeInsertCountOnAck(idx1);
-        assertEquals(3, table.encodedKnownReceivedCount()); // already acked
+        assertThat("Unexpected known received count.", table.encodedKnownReceivedCount(), is(3)); // already acked
     }
 
     @Test
@@ -190,7 +195,7 @@ public class QpackEncoderDynamicTableTest {
         table.acknowledgeInsertCountOnAck(idx1);
 
         // first entry still active
-        assertThat(addHeader(table, fooBar2Header)).isLessThan(0);
+        assertThat("Header added", addHeader(table, fooBar2Header), lessThan(0));
 
         table.acknowledgeInsertCountOnAck(idx1);
         verifyTableEmpty(table);
@@ -198,7 +203,7 @@ public class QpackEncoderDynamicTableTest {
     }
 
     private void verifyTableEmpty(QpackEncoderDynamicTable table) {
-        assertEquals(0, table.insertCount());
+        assertThat(table.insertCount(), is(0));
         insertCount = 0;
     }
 
@@ -216,7 +221,7 @@ public class QpackEncoderDynamicTableTest {
 
     private int addAndValidateHeader(QpackEncoderDynamicTable table, QpackHeaderField header) {
         final int addedIdx = addHeader(table, header);
-        assertThat(addedIdx).isGreaterThanOrEqualTo(0);
+        assertThat("Header addition failed.", addedIdx, greaterThanOrEqualTo(0));
         verifyInsertCount(table);
         return addedIdx;
     }
@@ -246,8 +251,8 @@ public class QpackEncoderDynamicTableTest {
     }
 
     private void verifyInsertCount(QpackEncoderDynamicTable table) {
-        assertEquals(expectedInsertCount(), table.encodedRequiredInsertCount(table.insertCount()),
-                "Unexpected required insert count.");
+        assertThat("Unexpected required insert count.",
+                table.encodedRequiredInsertCount(table.insertCount()), is(expectedInsertCount()));
     }
 
     private int expectedInsertCount() {

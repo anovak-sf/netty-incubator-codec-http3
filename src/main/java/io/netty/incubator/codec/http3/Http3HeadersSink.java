@@ -87,7 +87,7 @@ final class Http3HeadersSink implements BiConsumer<CharSequence, CharSequence> {
                         // - :path
                         // - :protocol
                         final int requiredPseudoHeaders = METHOD.getFlag() | SCHEME.getFlag() |
-                                AUTHORITY.getFlag() | PATH.getFlag() | PROTOCOL.getFlag();
+                                                         AUTHORITY.getFlag() | PATH.getFlag() | PROTOCOL.getFlag();
                         if (receivedPseudoHeaders != requiredPseudoHeaders) {
                             throw new Http3HeadersValidationException(
                                     "Not all mandatory pseudo-headers included for Extended CONNECT.");

@@ -18,9 +18,10 @@ package io.netty.incubator.codec.http3;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerAdapter;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import org.jetbrains.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class Http3UnidirectionalStreamWebTransportTest {
 
@@ -49,7 +51,7 @@ public class Http3UnidirectionalStreamWebTransportTest {
 
     private void setup(boolean server) {
         parent = new EmbeddedQuicChannel(server);
-        qpackEncoder = new QpackEncoder();
+        qpackEncoder = new QpackEncoder(null);
         qpackDecoder = new QpackDecoder(0, 0);
         remoteControlStreamHandler = new Http3ControlStreamOutboundHandler(
                 server, new DefaultHttp3SettingsFrame(), new ChannelHandlerAdapter() { });
@@ -179,14 +181,74 @@ public class Http3UnidirectionalStreamWebTransportTest {
         assertFalse(ch.finish());
     }
 
+    @ParameterizedTest(name = "{index}: server={0}")
+    @ValueSource(booleans = {true, false})
+    void testFragmentedSessionIdAndBufferedPayload(boolean server) throws Exception {
+        setup(server);
+        EmbeddedQuicStreamChannel ch = newUniStreamChannel(server, null);
+        ByteBuf prefix = wtUniStreamBuf(16384);
+        while (prefix.isReadable()) {
+            assertFalse(ch.writeInbound(Unpooled.buffer(1, 1).writeByte(prefix.readByte())));
+        }
+        prefix.release();
+        ByteBuf payload = Unpooled.buffer(1).writeByte(42);
+        assertFalse(ch.writeInbound(payload));
+        assertTrue(parent.isActive());
+        AtomicReference<ByteBuf> received = new AtomicReference<>();
+        EmbeddedQuicStreamChannel sessionStream = new EmbeddedQuicStreamChannel(
+                parent, false, QuicStreamType.BIDIRECTIONAL, 16384, new ChannelHandlerAdapter() { });
+        WebTransportSession session = new WebTransportSession(parent, sessionStream, 16384,
+                new WebTransportSessionListener() {
+                    @Override
+                    public void onBidirectionalStream(WebTransportSession s, QuicStreamChannel stream) { }
+                    @Override
+                    public void onUnidirectionalStream(WebTransportSession s, QuicStreamChannel stream) {
+                        stream.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                                received.set((ByteBuf) msg);
+                            }
+                        });
+                    }
+                    @Override
+                    public void onDatagram(WebTransportSession s, ByteBuf data) { }
+                    @Override
+                    public void onSessionClosed(WebTransportSession s, int code, String reason) { }
+                });
+        WebTransportSessionRegistry.getOrCreate(parent).register(16384, session);
+        assertEquals(42, received.get().readUnsignedByte());
+        received.get().release();
+        assertEquals(0, payload.refCnt());
+        assertFalse(ch.finish());
+        assertFalse(sessionStream.finish());
+    }
+
+    @ParameterizedTest(name = "{index}: server={0}")
+    @ValueSource(booleans = {true, false})
+    void testLargeUnknownTypeDoesNotAliasWebTransport(boolean server) throws Exception {
+        setup(server);
+        long type = (1L << 32) + WT_STREAM_TYPE_UNIDIRECTIONAL;
+        AtomicReference<Long> receivedType = new AtomicReference<>();
+        EmbeddedQuicStreamChannel ch = newUniStreamChannel(server, value -> {
+            receivedType.set(value);
+            return Http3UnidirectionalStreamInboundHandler.ReleaseHandler.INSTANCE;
+        });
+        ByteBuf prefix = Unpooled.buffer();
+        writeVariableLengthInteger(prefix, type);
+        assertFalse(ch.writeInbound(prefix));
+        assertEquals(type, receivedType.get());
+        assertTrue(parent.isActive());
+        assertFalse(ch.finish());
+    }
+
     @ParameterizedTest(name = "{index}: sessionId={0}")
-    @ValueSource(longs = {0L, 4L, 63L})
+    @ValueSource(longs = {0L, 4L, 60L})
     void testWtUnidirectionalStreamSessionIdVarint1Byte(long sessionId) throws Exception {
         doVarintSizeTest(sessionId);
     }
 
     @ParameterizedTest(name = "{index}: sessionId={0}")
-    @ValueSource(longs = {64L, 1000L, 16383L})
+    @ValueSource(longs = {64L, 1000L, 16380L})
     void testWtUnidirectionalStreamSessionIdVarint2Byte(long sessionId) throws Exception {
         doVarintSizeTest(sessionId);
     }

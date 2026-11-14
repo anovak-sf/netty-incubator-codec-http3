@@ -17,14 +17,15 @@ package io.netty.incubator.codec.http3;
 
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.socket.ChannelInputShutdownEvent;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.ReferenceCountUtil;
 
 /**
  * Handles capsules received on the WebTransport session stream and dispatches them to the
  * {@link WebTransportSessionListener}.
  * <p>
- * This handler is installed after the pipeline is rewired from HTTP/3 framing to the RFC 9297
- * capsule protocol.
+ * This handler receives capsules decoded from HTTP/3 DATA frames on the CONNECT stream.
  */
 final class WebTransportSessionStreamHandler extends ChannelInboundHandlerAdapter {
 
@@ -47,7 +48,9 @@ final class WebTransportSessionStreamHandler extends ChannelInboundHandlerAdapte
         if (msg instanceof WebTransportDatagramCapsule) {
             WebTransportDatagramCapsule capsule = (WebTransportDatagramCapsule) msg;
             try {
-                session.listener().onDatagram(session, capsule.content());
+                if (!session.isClosed()) {
+                    session.listener().onDatagram(session, capsule.content());
+                }
             } finally {
                 ReferenceCountUtil.release(capsule);
             }
@@ -55,11 +58,12 @@ final class WebTransportSessionStreamHandler extends ChannelInboundHandlerAdapte
             WebTransportCloseSessionCapsule close = (WebTransportCloseSessionCapsule) msg;
             closeErrorCode = close.applicationErrorCode();
             closeReason = close.errorReason();
-            // Close the channel after receiving the close capsule.
-            ctx.close();
+            session.terminate(closeErrorCode, closeReason);
+            ((QuicStreamChannel) ctx.channel()).shutdownOutput();
         } else if (msg instanceof WebTransportDrainSessionCapsule) {
-            // No action required — the peer wants to close soon.
-            ReferenceCountUtil.release(msg);
+            if (!session.isClosed()) {
+                session.listener().onSessionDraining(session);
+            }
         } else {
             ReferenceCountUtil.release(msg);
         }
@@ -67,14 +71,17 @@ final class WebTransportSessionStreamHandler extends ChannelInboundHandlerAdapte
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        // Deregister from the registry and notify the listener.
-        WebTransportSessionRegistry registry =
-                WebTransportSessionRegistry.get(ctx.channel().parent());
-        if (registry != null) {
-            registry.deregister(session.sessionId());
-        }
-        session.listener().onSessionClosed(session, closeErrorCode, closeReason);
+        session.terminate(closeErrorCode, closeReason);
         ctx.fireChannelInactive();
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof ChannelInputShutdownEvent) {
+            session.terminate(closeErrorCode, closeReason);
+            ((QuicStreamChannel) ctx.channel()).shutdownOutput();
+        }
+        ctx.fireUserEventTriggered(evt);
     }
 
     @Override

@@ -19,16 +19,17 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPromise;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicClientCodecBuilder;
-import io.netty.incubator.codec.quic.QuicCodecBuilder;
-import io.netty.incubator.codec.quic.QuicServerCodecBuilder;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannelBootstrap;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicClientCodecBuilder;
+import io.netty.handler.codec.quic.QuicCodecBuilder;
+import io.netty.handler.codec.quic.QuicServerCodecBuilder;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamChannelBootstrap;
+import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
+import io.netty.util.internal.ObjectUtil;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -176,7 +177,8 @@ public final class Http3 {
      * {@code :scheme}, {@code :authority}, and {@code :path}), and awaits a 2xx response.
      * <p>
      * On success the returned future completes with the established {@link WebTransportSession}.
-     * On failure (non-2xx response, connection error, or timeout) the future completes exceptionally.
+     * On failure (non-2xx response or connection error) the future completes exceptionally.
+     * The caller can cancel the future to stop waiting for the handshake.
      * <p>
      * <strong>Prerequisite:</strong> The QUIC connection must have been established with
      * {@link Http3WebTransportServerConnectionHandler} on the server side and
@@ -195,16 +197,68 @@ public final class Http3 {
             Http3Headers connectHeaders,
             WebTransportSessionListener listener) {
 
+        ObjectUtil.checkNotNull(channel, "channel");
+        ObjectUtil.checkNotNull(connectHeaders, "connectHeaders");
+        ObjectUtil.checkNotNull(listener, "listener");
+        final Http3Headers headers = new DefaultHttp3Headers().set(connectHeaders);
         final Promise<WebTransportSession> sessionPromise = channel.eventLoop().newPromise();
+        Runnable establish = () -> {
+            Http3ConnectionHandler connectionHandler = channel.pipeline().get(Http3ConnectionHandler.class);
+            if (connectionHandler == null) {
+                sessionPromise.tryFailure(new IllegalStateException("Http3ConnectionHandler not found"));
+                return;
+            }
+            connectionHandler.peerSettings().addListener(f -> {
+                if (sessionPromise.isDone()) {
+                    return;
+                }
+                if (!f.isSuccess()) {
+                    sessionPromise.tryFailure(f.cause());
+                } else if (!connectionHandler.webTransportSupported((Http3SettingsFrame) f.getNow())) {
+                    sessionPromise.tryFailure(new IllegalStateException("Peer did not negotiate WebTransport"));
+                } else if (connectionHandler.isGoAwayReceived()) {
+                    sessionPromise.tryFailure(new IllegalStateException("Peer sent GOAWAY"));
+                } else {
+                    try {
+                        createWebTransportSession(channel, headers, listener, sessionPromise);
+                    } catch (RuntimeException cause) {
+                        sessionPromise.tryFailure(cause);
+                    }
+                }
+            });
+        };
+        if (channel.eventLoop().inEventLoop()) {
+            establish.run();
+        } else {
+            try {
+                channel.eventLoop().execute(establish);
+            } catch (RuntimeException e) {
+                sessionPromise.tryFailure(e);
+            }
+        }
+        return sessionPromise;
+    }
 
+    private static void createWebTransportSession(QuicChannel channel, Http3Headers connectHeaders,
+                                                  WebTransportSessionListener listener,
+                                                  Promise<WebTransportSession> sessionPromise) {
         channel.createStream(QuicStreamType.BIDIRECTIONAL, new ChannelInitializer<QuicStreamChannel>() {
             @Override
             protected void initChannel(QuicStreamChannel ch) throws Exception {
                 Http3ConnectionHandler connectionHandler =
                         Http3CodecUtils.getConnectionHandlerOrClose(channel);
                 if (connectionHandler == null) {
-                    sessionPromise.setFailure(new IllegalStateException(
+                    sessionPromise.tryFailure(new IllegalStateException(
                             "Http3ConnectionHandler not found on the parent channel pipeline"));
+                    ch.close();
+                    return;
+                }
+                sessionPromise.addListener(f -> {
+                    if (f.isCancelled()) {
+                        ch.close();
+                    }
+                });
+                if (sessionPromise.isCancelled()) {
                     ch.close();
                     return;
                 }
@@ -214,7 +268,7 @@ public final class Http3 {
                         WebTransportSessionRegistry registry = channel.attr(
                                 WebTransportSessionRegistry.REGISTRY_KEY).get();
                         if (registry == null) {
-                            sessionPromise.setFailure(new IllegalStateException(
+                            sessionPromise.tryFailure(new IllegalStateException(
                                     "WebTransportSessionRegistry not found — was the session established?"));
                             return;
                         }
@@ -223,7 +277,7 @@ public final class Http3 {
                         if (session != null) {
                             sessionPromise.trySuccess(session);
                         } else {
-                            sessionPromise.setFailure(new IllegalStateException(
+                            sessionPromise.tryFailure(new IllegalStateException(
                                     "Session not registered after successful establishment"));
                         }
                     } else {
@@ -240,9 +294,11 @@ public final class Http3 {
                         connectionHandler.newRequestStreamValidationHandler(ch, encodeState, decodeState));
                 ch.pipeline().addLast(new WebTransportClientSessionHandler(connectHeaders, listener, promise));
             }
+        }).addListener(f -> {
+            if (!f.isSuccess()) {
+                sessionPromise.tryFailure(f.cause());
+            }
         });
-
-        return sessionPromise;
     }
 
     private static Http3RequestStreamInitializer requestStreamInitializer(ChannelHandler handler) {

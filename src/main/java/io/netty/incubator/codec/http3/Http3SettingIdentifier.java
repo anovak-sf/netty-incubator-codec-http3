@@ -90,10 +90,11 @@ public enum Http3SettingIdentifier {
     /**
      * ENABLE_WEBTRANSPORT setting identifier (<b>0x2b603742</b>).
      * <p>
-     * Defined in <a href="https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/">
-     * WebTransport over HTTP/3</a>.
+     * Defined in <a href="https://www.ietf.org/archive/id/draft-ietf-webtrans-http3-02.html#section-3.1">
+     * the legacy WebTransport over HTTP/3 draft</a>. This is not the WT_MAX_SESSIONS setting
+     * used by later versions of the specification.
      * <br>
-     * Enables WebTransport over HTTP/3 when set to a value greater than 0; disabled when 0.
+     * Enables WebTransport over HTTP/3 when set to 1; disabled when 0. Other values are invalid.
      * Requires {@link #HTTP3_SETTINGS_ENABLE_CONNECT_PROTOCOL} and {@link #HTTP3_SETTINGS_H3_DATAGRAM}
      * to also be enabled.
      */
@@ -102,7 +103,7 @@ public enum Http3SettingIdentifier {
     private final long id;
 
     private static final Map<Long, Http3SettingIdentifier> LOOKUP = Collections.unmodifiableMap(
-            Arrays.stream(values()).collect(Collectors.toMap(Http3SettingIdentifier::id, Function.identity()))
+        Arrays.stream(values()).collect(Collectors.toMap(Http3SettingIdentifier::id, Function.identity()))
     );
 
     Http3SettingIdentifier(long id) {

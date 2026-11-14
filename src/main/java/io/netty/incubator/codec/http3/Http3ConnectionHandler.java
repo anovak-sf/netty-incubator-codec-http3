@@ -15,26 +15,30 @@
  */
 package io.netty.incubator.codec.http3;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.incubator.codec.http3.Http3FrameCodec.Http3FrameCodecFactory;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicDatagramExtensionEvent;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 import org.jetbrains.annotations.Nullable;
 
+import java.nio.channels.ClosedChannelException;
 import java.util.function.LongFunction;
 
 import static io.netty.incubator.codec.http3.Http3RequestStreamCodecState.NO_STATE;
-import static io.netty.incubator.codec.http3.Http3SettingsFrame.HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS;
-import static io.netty.incubator.codec.http3.Http3SettingsFrame.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY;
 import static java.lang.Math.toIntExact;
 
 /**
- * Handler that handles <a href="https://tools.ietf.org/html/draft-ietf-quic-http-32">HTTP3</a> connections.
+ * Handler that handles <a href="https://datatracker.ietf.org/doc/html/rfc9114">HTTP3</a> connections.
  */
 public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapter {
+
     final Http3FrameCodecFactory codecFactory;
     final LongFunction<ChannelHandler> unknownInboundStreamHandlerFactory;
     final boolean disableQpackDynamicTable;
@@ -44,6 +48,9 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
     final QpackEncoder qpackEncoder;
     final Http3Settings.NonStandardHttp3SettingsValidator nonStandardSettingsValidator;
     private boolean controlStreamCreationInProgress;
+    private final Http3SettingsFrame localSettings;
+    private Promise<Http3SettingsFrame> peerSettings;
+    private boolean datagramExtensionNegotiated;
 
     final long maxTableCapacity;
 
@@ -59,11 +66,23 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
      * @param localSettings                         the local {@link Http3SettingsFrame} that should be sent to the
      *                                              remote peer or {@code null} if the default settings should be used.
      * @param disableQpackDynamicTable              If QPACK dynamic table should be disabled.
+     * @param maxUnknownFramePayloadLength          the maximum payload size of an unknown frame.
      */
     Http3ConnectionHandler(boolean server, @Nullable ChannelHandler inboundControlStreamHandler,
                            @Nullable LongFunction<ChannelHandler> unknownInboundStreamHandlerFactory,
                            @Nullable Http3SettingsFrame localSettings, boolean disableQpackDynamicTable,
-                           @Nullable Http3Settings.NonStandardHttp3SettingsValidator nonStandardSettingsValidator) {
+                           @Nullable Http3Settings.NonStandardHttp3SettingsValidator nonStandardSettingsValidator,
+                           int maxUnknownFramePayloadLength) {
+        this(server, inboundControlStreamHandler, unknownInboundStreamHandlerFactory, localSettings,
+                disableQpackDynamicTable, nonStandardSettingsValidator, null, maxUnknownFramePayloadLength);
+    }
+
+    Http3ConnectionHandler(boolean server, @Nullable ChannelHandler inboundControlStreamHandler,
+                           @Nullable LongFunction<ChannelHandler> unknownInboundStreamHandlerFactory,
+                           @Nullable Http3SettingsFrame localSettings, boolean disableQpackDynamicTable,
+                           @Nullable Http3Settings.NonStandardHttp3SettingsValidator nonStandardSettingsValidator,
+                           @Nullable QpackSensitivityDetector sensitivityDetector,
+                           int maxUnknownFramePayloadLength) {
         this.unknownInboundStreamHandlerFactory = unknownInboundStreamHandlerFactory;
         this.disableQpackDynamicTable = disableQpackDynamicTable;
         if (nonStandardSettingsValidator != null) {
@@ -72,21 +91,33 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
             this.nonStandardSettingsValidator = (id, value) -> false;
         }
         if (localSettings == null) {
-            localSettings = new DefaultHttp3SettingsFrame();
+            localSettings = new DefaultHttp3SettingsFrame(Http3Settings.defaultSettings());
         } else {
             localSettings = DefaultHttp3SettingsFrame.copyOf(localSettings);
         }
-        Long maxFieldSectionSize = localSettings.get(Http3SettingsFrame.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE);
-        if (maxFieldSectionSize == null) {
-            // Default value in rfc is unlimited
-            // but Quic can have max 2^62-1 max value as TWO bits reserved for Variable-Length Integer Encoding
-            maxFieldSectionSize = (1L << 62) - 1;
-        }
-        this.maxTableCapacity = localSettings.getOrDefault(HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0);
-        int maxBlockedStreams = toIntExact(localSettings.getOrDefault(HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS, 0));
+        this.localSettings = localSettings;
+        Long maxFieldSectionSize = localSettings
+                .settings()
+                .getOrDefault(
+                        Http3SettingIdentifier.HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE.id(),
+                        Http3CodecUtils.DEFAULT_MAX_FIELD_SECTION_SIZE
+                );
+        this.maxTableCapacity = localSettings
+                .settings()
+                .getOrDefault(
+                        Http3SettingIdentifier.HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY.id(),
+                        0L
+                );
+        int maxBlockedStreams = toIntExact(localSettings
+                .settings()
+                .getOrDefault(
+                        Http3SettingIdentifier.HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS.id(),
+                        0L)
+        );
         qpackDecoder = new QpackDecoder(maxTableCapacity, maxBlockedStreams);
-        qpackEncoder = new QpackEncoder();
-        codecFactory = Http3FrameCodec.newFactory(qpackDecoder, maxFieldSectionSize, qpackEncoder);
+        qpackEncoder = new QpackEncoder(sensitivityDetector);
+        codecFactory = Http3FrameCodec.newFactory(
+                qpackDecoder, maxFieldSectionSize, maxUnknownFramePayloadLength, qpackEncoder);
         remoteControlStreamHandler =  new Http3ControlStreamOutboundHandler(server, localSettings,
                 codecFactory.newCodec(Http3FrameTypeValidator.NO_VALIDATION, NO_STATE, NO_STATE,
                         this.nonStandardSettingsValidator));
@@ -98,9 +129,9 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
         if (!controlStreamCreationInProgress && Http3.getLocalControlStream(ctx.channel()) == null) {
             controlStreamCreationInProgress = true;
             QuicChannel channel = (QuicChannel) ctx.channel();
-            // Once the channel became active we need to create an unidirectional stream and write the
+            // Once the channel became active we need to create a unidirectional stream and write the
             // Http3SettingsFrame to it. This needs to be the first frame on this stream.
-            // https://tools.ietf.org/html/draft-ietf-quic-http-32#section-6.2.1.
+            // https://datatracker.ietf.org/doc/html/rfc9114#name-control-streams
             channel.createStream(QuicStreamType.UNIDIRECTIONAL, remoteControlStreamHandler)
                     .addListener(f -> {
                         if (!f.isSuccess()) {
@@ -128,7 +159,7 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
      * @return a new codec.
      */
     public final ChannelHandler newCodec(Http3RequestStreamCodecState encodeState,
-                                         Http3RequestStreamCodecState decodeState) {
+                                  Http3RequestStreamCodecState decodeState) {
         return codecFactory.newCodec(
                 Http3RequestStreamFrameTypeValidator.INSTANCE, encodeState, decodeState, nonStandardSettingsValidator);
     }
@@ -159,6 +190,8 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) {
         QuicChannel channel = (QuicChannel) ctx.channel();
+        peerSettings = channel.eventLoop().newPromise();
+        channel.closeFuture().addListener(f -> peerSettings.tryFailure(new ClosedChannelException()));
         Http3.setQpackAttributes(channel, new QpackAttributes(channel, disableQpackDynamicTable));
         if (ctx.channel().isActive()) {
             createControlStreamIfNeeded(ctx);
@@ -173,6 +206,16 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
     }
 
     @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+        if (evt instanceof QuicDatagramExtensionEvent) {
+            // Use the negotiated extension event rather than relying on a native
+            // transport-parameter snapshot to detect datagram support.
+            datagramExtensionNegotiated = true;
+        }
+        ctx.fireUserEventTriggered(evt);
+    }
+
+    @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof QuicStreamChannel) {
             QuicStreamChannel channel = (QuicStreamChannel) msg;
@@ -184,10 +227,58 @@ public abstract class Http3ConnectionHandler extends ChannelInboundHandlerAdapte
                     initUnidirectionalStream(ctx, channel);
                     break;
                 default:
-                    throw new Error();
+                    throw new Error("Unexpected channel type: " + channel.type());
             }
+        } else if (msg instanceof ByteBuf && webTransportEnabled()) {
+            ByteBuf datagram = (ByteBuf) msg;
+            try {
+                if (!datagram.isReadable()) {
+                    Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_DATAGRAM_ERROR,
+                            "Missing HTTP Datagram Quarter Stream ID", false);
+                    return;
+                }
+                int length = Http3CodecUtils.numBytesForVariableLengthInteger(datagram.getByte(datagram.readerIndex()));
+                if (datagram.readableBytes() < length) {
+                    Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_DATAGRAM_ERROR,
+                            "Truncated HTTP Datagram Quarter Stream ID", false);
+                    return;
+                }
+                long quarterStreamId = Http3CodecUtils.readVariableLengthInteger(datagram, length);
+                if (quarterStreamId > ((1L << 60) - 1)) {
+                    Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_DATAGRAM_ERROR,
+                            "HTTP Datagram Quarter Stream ID exceeds the stream ID range", false);
+                    return;
+                }
+                WebTransportSessionRegistry.getOrCreate(ctx.channel()).receiveDatagram(
+                        quarterStreamId << 2, datagram.readRetainedSlice(datagram.readableBytes()));
+            } finally {
+                datagram.release();
+            }
+            return;
         }
         ctx.fireChannelRead(msg);
+    }
+
+    final boolean webTransportEnabled() {
+        return localSettings.getOrDefault(Http3SettingIdentifier.HTTP3_SETTINGS_WEBTRANSPORT_ENABLE.id(), 0) == 1;
+    }
+
+    final Future<Http3SettingsFrame> peerSettings() {
+        return peerSettings;
+    }
+
+    final void peerSettingsReceived(Http3SettingsFrame settings) {
+        peerSettings.trySuccess(DefaultHttp3SettingsFrame.copyOf(settings));
+    }
+
+    final boolean webTransportSupported(Http3SettingsFrame settings) {
+        long datagramId = Http3SettingIdentifier.HTTP3_SETTINGS_H3_DATAGRAM.id();
+        long connectId = Http3SettingIdentifier.HTTP3_SETTINGS_ENABLE_CONNECT_PROTOCOL.id();
+        Http3SettingsFrame serverSettings = localControlStreamHandler.isServer() ? localSettings : settings;
+        return webTransportEnabled() && localSettings.getOrDefault(datagramId, 0) == 1 &&
+                settings.getOrDefault(Http3SettingIdentifier.HTTP3_SETTINGS_WEBTRANSPORT_ENABLE.id(), 0) == 1 &&
+                settings.getOrDefault(datagramId, 0) == 1 && serverSettings.getOrDefault(connectId, 0) == 1 &&
+                datagramExtensionNegotiated;
     }
 
     /**

@@ -28,6 +28,8 @@ public interface WebTransportSessionAcceptor {
 
     /**
      * Determines whether to accept the WebTransport session request described by {@code requestHeaders}.
+     * If an {@code Origin} header is present, the implementation must verify that the origin
+     * is allowed to access this resource before accepting the session.
      *
      * @param requestHeaders the HTTP/3 headers from the Extended CONNECT request;
      *                       includes {@code :method}, {@code :protocol}, {@code :scheme},

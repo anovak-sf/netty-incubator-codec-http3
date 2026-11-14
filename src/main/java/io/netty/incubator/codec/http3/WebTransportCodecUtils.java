@@ -24,8 +24,8 @@ package io.netty.incubator.codec.http3;
 final class WebTransportCodecUtils {
 
     /**
-     * Stream type byte that prefixes WebTransport bidirectional streams.
-     * Written as the first byte of a QUIC bidirectional stream opened for WebTransport use,
+     * Stream type that prefixes WebTransport bidirectional streams.
+     * Written as a variable-length integer on a QUIC bidirectional stream opened for WebTransport use,
      * followed by the session ID as a variable-length integer.
      */
     static final int WT_STREAM_TYPE_BIDIRECTIONAL = 0x41;
@@ -59,6 +59,9 @@ final class WebTransportCodecUtils {
      * Maximum length in bytes of a CLOSE_WEBTRANSPORT_SESSION reason string.
      */
     static final int WT_CLOSE_REASON_MAX_LEN = 1024;
+
+    static final int WT_SESSION_GONE = 0x170d7b68;
+    static final int WT_BUFFERED_STREAM_REJECTED = 0x3994bd84;
 
     private WebTransportCodecUtils() {
     }

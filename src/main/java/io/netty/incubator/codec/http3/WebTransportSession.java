@@ -19,11 +19,17 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
-import io.netty.incubator.codec.quic.QuicChannel;
-import io.netty.incubator.codec.quic.QuicStreamChannel;
-import io.netty.incubator.codec.quic.QuicStreamType;
+import io.netty.channel.ChannelPromise;
+import io.netty.handler.codec.quic.QuicChannel;
+import io.netty.handler.codec.quic.QuicStreamChannel;
+import io.netty.handler.codec.quic.QuicStreamType;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.ObjectUtil;
+
+import java.nio.channels.ClosedChannelException;
+import java.util.HashSet;
+import java.util.Set;
 
 import static io.netty.incubator.codec.http3.WebTransportCodecUtils.WT_STREAM_TYPE_BIDIRECTIONAL;
 import static io.netty.incubator.codec.http3.WebTransportCodecUtils.WT_STREAM_TYPE_UNIDIRECTIONAL;
@@ -46,6 +52,8 @@ public final class WebTransportSession {
     private final QuicStreamChannel sessionStream;
     private final long sessionId;
     private final WebTransportSessionListener listener;
+    private final Set<QuicStreamChannel> streams = new HashSet<>();
+    private volatile boolean closed;
 
     WebTransportSession(QuicChannel quicChannel, QuicStreamChannel sessionStream,
                         long sessionId, WebTransportSessionListener listener) {
@@ -53,6 +61,7 @@ public final class WebTransportSession {
         this.sessionStream = ObjectUtil.checkNotNull(sessionStream, "sessionStream");
         this.sessionId = sessionId;
         this.listener = ObjectUtil.checkNotNull(listener, "listener");
+        sessionStream.closeFuture().addListener(f -> terminate(0, ""));
     }
 
     /**
@@ -94,16 +103,7 @@ public final class WebTransportSession {
      * @return a future that completes with the opened {@link QuicStreamChannel}
      */
     public Future<QuicStreamChannel> openBidirectionalStream(final ChannelHandler handler) {
-        final long sid = sessionId;
-        return quicChannel.createStream(QuicStreamType.BIDIRECTIONAL,
-                new ChannelInitializer<QuicStreamChannel>() {
-                    @Override
-                    protected void initChannel(QuicStreamChannel ch) {
-                        ch.pipeline().addLast(
-                                new WebTransportStreamOutboundPrefixHandler(WT_STREAM_TYPE_BIDIRECTIONAL, sid));
-                        ch.pipeline().addLast(handler);
-                    }
-                });
+        return openStream(QuicStreamType.BIDIRECTIONAL, WT_STREAM_TYPE_BIDIRECTIONAL, handler);
     }
 
     /**
@@ -116,31 +116,90 @@ public final class WebTransportSession {
      * @return a future that completes with the opened {@link QuicStreamChannel}
      */
     public Future<QuicStreamChannel> openUnidirectionalStream(final ChannelHandler handler) {
-        final long sid = sessionId;
-        return quicChannel.createStream(QuicStreamType.UNIDIRECTIONAL,
-                new ChannelInitializer<QuicStreamChannel>() {
-                    @Override
-                    protected void initChannel(QuicStreamChannel ch) {
-                        ch.pipeline().addLast(
-                                new WebTransportStreamOutboundPrefixHandler(WT_STREAM_TYPE_UNIDIRECTIONAL, sid));
-                        ch.pipeline().addLast(handler);
+        return openStream(QuicStreamType.UNIDIRECTIONAL, WT_STREAM_TYPE_UNIDIRECTIONAL, handler);
+    }
+
+    private Future<QuicStreamChannel> openStream(QuicStreamType type, int streamType, ChannelHandler handler) {
+        ObjectUtil.checkNotNull(handler, "handler");
+        if (isClosed()) {
+            return quicChannel.eventLoop().newFailedFuture(new ClosedChannelException());
+        }
+        Promise<QuicStreamChannel> promise = quicChannel.eventLoop().newPromise();
+        try {
+            quicChannel.createStream(type, new ChannelInitializer<QuicStreamChannel>() {
+                @Override
+                protected void initChannel(QuicStreamChannel ch) {
+                    if (!addStream(ch)) {
+                        ch.close();
+                        return;
                     }
-                });
+                    ch.pipeline().addLast(new WebTransportStreamOutboundPrefixHandler(streamType, sessionId));
+                    ch.pipeline().addLast(handler);
+                }
+            }).addListener(future -> {
+                if (!future.isSuccess()) {
+                    promise.tryFailure(future.cause());
+                    return;
+                }
+                QuicStreamChannel stream = (QuicStreamChannel) future.getNow();
+                // Session termination can race with asynchronous creation, or happen in the
+                // application's channelActive callback before the QUIC create future completes.
+                if (isClosed()) {
+                    resetStream(stream);
+                    stream.close();
+                    promise.tryFailure(new ClosedChannelException());
+                } else if (!promise.trySuccess(stream)) {
+                    stream.close();
+                }
+            });
+        } catch (RuntimeException cause) {
+            promise.tryFailure(cause);
+        }
+        return promise;
     }
 
     /**
-     * Sends a datagram to the peer for this session as a {@link WebTransportDatagramCapsule}
-     * on the session stream.
+     * Sends an unreliable HTTP Datagram using a QUIC DATAGRAM frame. The session's Quarter
+     * Stream ID is prepended to the application payload as required by RFC 9297.
      * <p>
      * The caller retains ownership of {@code payload} — this method will increment the reference count
-     * internally by creating a retained duplicate. Release {@code payload} after calling this method if
+     * internally while the write is pending. Release {@code payload} after calling this method if
      * you no longer need it.
      *
      * @param payload the datagram payload
      * @return the future for the write operation
      */
     public ChannelFuture sendDatagram(ByteBuf payload) {
-        return sessionStream.writeAndFlush(new WebTransportDatagramCapsule(payload.retainedDuplicate()));
+        ObjectUtil.checkNotNull(payload, "payload");
+        ChannelPromise promise = quicChannel.newPromise();
+        ByteBuf retained = payload.retainedDuplicate();
+        Runnable write = () -> {
+            try {
+                if (isClosed()) {
+                    promise.tryFailure(new ClosedChannelException());
+                    return;
+                }
+                ByteBuf datagram = quicChannel.alloc().buffer(8 + retained.readableBytes());
+                Http3CodecUtils.writeVariableLengthInteger(datagram, sessionId >>> 2);
+                datagram.writeBytes(retained);
+                quicChannel.writeAndFlush(datagram, promise);
+            } catch (RuntimeException e) {
+                promise.tryFailure(e);
+            } finally {
+                retained.release();
+            }
+        };
+        if (quicChannel.eventLoop().inEventLoop()) {
+            write.run();
+        } else {
+            try {
+                quicChannel.eventLoop().execute(write);
+            } catch (RuntimeException e) {
+                retained.release();
+                promise.tryFailure(e);
+            }
+        }
+        return promise;
     }
 
     /**
@@ -154,7 +213,92 @@ public final class WebTransportSession {
     public ChannelFuture closeSession(int applicationErrorCode, String reason) {
         WebTransportCloseSessionCapsule closeCapsule =
                 new WebTransportCloseSessionCapsule(applicationErrorCode, reason);
-        return sessionStream.writeAndFlush(closeCapsule).addListener(f -> sessionStream.close());
+        ChannelPromise promise = sessionStream.newPromise();
+        Runnable close = () -> {
+            if (isClosed()) {
+                promise.tryFailure(new ClosedChannelException());
+                return;
+            }
+            terminate(applicationErrorCode, reason);
+            sessionStream.writeAndFlush(closeCapsule).addListener(f -> {
+                if (f.isSuccess()) {
+                    sessionStream.shutdownOutput(promise);
+                } else {
+                    promise.tryFailure(f.cause());
+                    sessionStream.close();
+                }
+            });
+        };
+        if (sessionStream.eventLoop().inEventLoop()) {
+            close.run();
+        } else {
+            try {
+                sessionStream.eventLoop().execute(close);
+            } catch (RuntimeException e) {
+                promise.tryFailure(e);
+            }
+        }
+        return promise;
+    }
+
+    /**
+     * Returns whether this session has terminated and can no longer send datagrams or open streams.
+     * @return {@code true} after session termination
+     */
+    public boolean isClosed() {
+        return closed || !sessionStream.isActive();
+    }
+
+    synchronized boolean addStream(QuicStreamChannel stream) {
+        if (isClosed()) {
+            resetStream(stream);
+            return false;
+        }
+        streams.add(stream);
+        stream.closeFuture().addListener(f -> removeStream(stream));
+        return true;
+    }
+
+    private synchronized void removeStream(QuicStreamChannel stream) {
+        streams.remove(stream);
+    }
+
+    void terminate(int errorCode, String reason) {
+        Set<QuicStreamChannel> toReset;
+        synchronized (this) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            toReset = new HashSet<>(streams);
+            streams.clear();
+        }
+        WebTransportSessionRegistry registry = WebTransportSessionRegistry.get(quicChannel);
+        if (registry != null) {
+            registry.deregister(sessionId);
+        }
+        for (QuicStreamChannel stream : toReset) {
+            resetStream(stream);
+        }
+        try {
+            listener.onSessionClosed(this, errorCode, reason);
+        } catch (Throwable cause) {
+            sessionStream.pipeline().fireExceptionCaught(cause);
+        }
+    }
+
+    private static void resetStream(QuicStreamChannel stream) {
+        if (stream.type() == QuicStreamType.BIDIRECTIONAL) {
+            stream.shutdown(WebTransportCodecUtils.WT_SESSION_GONE);
+        } else if (stream.isLocalCreated()) {
+            stream.shutdownOutput(WebTransportCodecUtils.WT_SESSION_GONE);
+        } else {
+            stream.shutdownInput(WebTransportCodecUtils.WT_SESSION_GONE);
+        }
+        // Reset ends the QUIC directions but does not immediately close Netty's channel.
+        // Close it too so application producers see an inactive stream and queued writes
+        // cannot reach quiche after the final send offset was established by the reset.
+        stream.close();
     }
 
     @Override

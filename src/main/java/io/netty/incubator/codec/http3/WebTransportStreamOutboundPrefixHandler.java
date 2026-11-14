@@ -16,14 +16,15 @@
 package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 
 import static io.netty.incubator.codec.http3.Http3CodecUtils.numBytesForVariableLengthInteger;
 import static io.netty.incubator.codec.http3.Http3CodecUtils.writeVariableLengthInteger;
 
 /**
- * One-shot handler that writes the WebTransport stream prefix on channel activation.
+ * One-shot handler that writes the WebTransport prefix before application data or on channel activation.
  * <p>
  * Per draft-ietf-webtrans-http3 §4.1 the prefix is two QUIC variable-length integers:
  * {@code [streamType(varint)][sessionId(varint)]}. The stream type is {@code 0x41} for
@@ -33,7 +34,7 @@ import static io.netty.incubator.codec.http3.Http3CodecUtils.writeVariableLength
  * After writing the prefix the handler removes itself from the pipeline, leaving the user's
  * handler to process raw bytes.
  */
-final class WebTransportStreamOutboundPrefixHandler extends ChannelInboundHandlerAdapter {
+final class WebTransportStreamOutboundPrefixHandler extends ChannelDuplexHandler {
 
     private final int streamTypeByte;
     private final long sessionId;
@@ -52,6 +53,19 @@ final class WebTransportStreamOutboundPrefixHandler extends ChannelInboundHandle
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        writePrefix(ctx);
+        ctx.flush();
+        ctx.fireChannelActive();
+    }
+
+    @Override
+    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+        // User handlers may write from handlerAdded or channelRegistered, before channelActive.
+        writePrefix(ctx);
+        ctx.write(msg, promise);
+    }
+
+    private void writePrefix(ChannelHandlerContext ctx) {
         // The WebTransport stream signal is a QUIC variable-length integer
         // (draft-ietf-webtrans-http3 §4.1). Values 0x41 (bidi) and 0x54 (uni) both exceed the 1-byte
         // varint range (0..63) and must be encoded as 2-byte varints on the wire.
@@ -60,11 +74,10 @@ final class WebTransportStreamOutboundPrefixHandler extends ChannelInboundHandle
         ByteBuf prefix = ctx.alloc().buffer(typeVarintLen + sidVarintLen);
         writeVariableLengthInteger(prefix, streamTypeByte);
         writeVariableLengthInteger(prefix, sessionId);
-        ctx.writeAndFlush(prefix);
+        Http3CodecUtils.closeOnFailure(ctx.write(prefix));
 
         // Remove self — subsequent writes go directly to the user's handler.
         ctx.pipeline().remove(this);
-        ctx.fireChannelActive();
     }
 
     @Override

@@ -59,6 +59,12 @@ public class Http3SettingsWebTransportTest {
     }
 
     @Test
+    void testLegacyEnableSettingRejectsSessionCounts() {
+        assertThrows(IllegalArgumentException.class, () -> new Http3Settings().put(
+                Http3SettingIdentifier.HTTP3_SETTINGS_WEBTRANSPORT_ENABLE.id(), 2L));
+    }
+
+    @Test
     void testSettingIdentifierValue() {
         assertEquals(0x2b603742L, Http3SettingIdentifier.HTTP3_SETTINGS_WEBTRANSPORT_ENABLE.id());
     }

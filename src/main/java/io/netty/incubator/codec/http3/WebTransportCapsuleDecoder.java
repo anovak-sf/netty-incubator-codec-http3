@@ -16,8 +16,10 @@
 package io.netty.incubator.codec.http3;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
+import io.netty.handler.codec.quic.QuicStreamChannel;
 import io.netty.util.CharsetUtil;
 
 import java.util.List;
@@ -39,83 +41,127 @@ import static io.netty.incubator.codec.http3.WebTransportCodecUtils.CAPSULE_TYPE
  * </pre>
  * <p>
  * Known capsule types are decoded into {@link WebTransportCapsule} subtypes and emitted.
- * Unknown capsule types are silently discarded per RFC 9297 §3.3.
+ * Unknown capsule types are silently discarded per RFC 9297 §3.2.
  *
  * @see <a href="https://www.rfc-editor.org/rfc/rfc9297">RFC 9297 - HTTP Datagrams and the Capsule Protocol</a>
  */
 final class WebTransportCapsuleDecoder extends ByteToMessageDecoder {
 
+    static final int MAX_DATAGRAM_CAPSULE_LENGTH = 65535;
+
+    private long bytesToDiscard;
+    private boolean closeReceived;
+    private boolean failed;
+
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
-        // Need at least 1 byte to determine the type length.
+        if (failed) {
+            in.skipBytes(in.readableBytes());
+            return;
+        }
         if (!in.isReadable()) {
             return;
         }
+        if (closeReceived) {
+            fail(ctx, in);
+            return;
+        }
+        if (bytesToDiscard != 0) {
+            discard(in);
+            return;
+        }
 
-        // Read capsule type (varint)
-        int typeLen = numBytesForVariableLengthInteger(in.getByte(in.readerIndex()));
+        int start = in.readerIndex();
+        int typeLen = numBytesForVariableLengthInteger(in.getByte(start));
         if (in.readableBytes() < typeLen) {
             return;
         }
-        // Peek the type without consuming yet — we need to know how many bytes to skip for unknown types.
-        long type = readVariableLengthInteger(in.slice(in.readerIndex(), typeLen), typeLen);
-
-        // Advance past type
-        in.skipBytes(typeLen);
-
-        // Read capsule length (varint)
+        long type = readVariableLengthInteger(in, typeLen);
         if (!in.isReadable()) {
-            // Roll back — not enough for length varint
-            in.readerIndex(in.readerIndex() - typeLen);
+            in.readerIndex(start);
             return;
         }
         int lenLen = numBytesForVariableLengthInteger(in.getByte(in.readerIndex()));
         if (in.readableBytes() < lenLen) {
-            in.readerIndex(in.readerIndex() - typeLen);
+            in.readerIndex(start);
             return;
         }
         long capsuleLength = readVariableLengthInteger(in, lenLen);
-        if (capsuleLength < 0 || capsuleLength > Integer.MAX_VALUE) {
-            // Length cannot be negative or more than we can handle.
-            in.readerIndex(in.readerIndex() - typeLen - lenLen);
-            Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_MESSAGE_ERROR,
-                    "Capsule length out of range: " + capsuleLength, false);
+
+        if (type == CAPSULE_TYPE_CLOSE_WEBTRANSPORT_SESSION) {
+            if (capsuleLength < 4 || capsuleLength > 4 + WebTransportCodecUtils.WT_CLOSE_REASON_MAX_LEN) {
+                fail(ctx, in);
+                return;
+            }
+        } else if (type == CAPSULE_TYPE_DRAIN_WEBTRANSPORT_SESSION) {
+            // RFC 9297 requires exactly the fields defined by the capsule type.
+            if (capsuleLength != 0) {
+                fail(ctx, in);
+                return;
+            }
+            out.add(WebTransportDrainSessionCapsule.INSTANCE);
+            return;
+        } else if (type != CAPSULE_TYPE_DATAGRAM || capsuleLength > MAX_DATAGRAM_CAPSULE_LENGTH) {
+            // Skip unknown and unusably large datagrams incrementally. Buffering their entire
+            // value can exhaust memory or the flow-control window (RFC 9297 sections 3.2 and 3.5).
+            bytesToDiscard = capsuleLength;
+            discard(in);
             return;
         }
 
         int length = (int) capsuleLength;
-
-        // Ensure all capsule value bytes are available before consuming
         if (in.readableBytes() < length) {
-            // Roll back to beginning of this capsule
-            in.readerIndex(in.readerIndex() - typeLen - lenLen);
+            in.readerIndex(start);
             return;
         }
-
-        // Dispatch
         if (type == CAPSULE_TYPE_DATAGRAM) {
-            ByteBuf payload = in.readRetainedSlice(length);
-            out.add(new WebTransportDatagramCapsule(payload));
-        } else if (type == CAPSULE_TYPE_CLOSE_WEBTRANSPORT_SESSION) {
-            if (length < 4) {
-                Http3CodecUtils.connectionError(ctx, Http3ErrorCode.H3_MESSAGE_ERROR,
-                        "CLOSE_WEBTRANSPORT_SESSION capsule too short: " + length, false);
-                return;
-            }
+            out.add(new WebTransportDatagramCapsule(in.readRetainedSlice(length)));
+        } else {
             int errorCode = in.readInt();
             int reasonLen = length - 4;
-            String reason = reasonLen > 0 ? in.readCharSequence(reasonLen, CharsetUtil.UTF_8).toString() : "";
-            out.add(new WebTransportCloseSessionCapsule(errorCode, reason));
-        } else if (type == CAPSULE_TYPE_DRAIN_WEBTRANSPORT_SESSION) {
-            if (length != 0) {
-                // Spec says DRAIN has empty payload; skip unexpected bytes but still deliver the capsule.
-                in.skipBytes(length);
+            if (!ByteBufUtil.isText(in, in.readerIndex(), reasonLen, CharsetUtil.UTF_8)) {
+                fail(ctx, in);
+                return;
             }
-            out.add(WebTransportDrainSessionCapsule.INSTANCE);
-        } else {
-            // Unknown capsule type — silently discard per RFC 9297 §3.3.
-            in.skipBytes(length);
+            String reason = in.readCharSequence(reasonLen, CharsetUtil.UTF_8).toString();
+            closeReceived = true;
+            out.add(new WebTransportCloseSessionCapsule(errorCode, reason));
+            // Check before delivering the close capsule: its consumer can close the channel.
+            if (in.isReadable()) {
+                fail(ctx, in);
+            }
         }
+    }
+
+    private void discard(ByteBuf in) {
+        int discarded = (int) Math.min(bytesToDiscard, in.readableBytes());
+        in.skipBytes(discarded);
+        bytesToDiscard -= discarded;
+    }
+
+    @Override
+    protected void decodeLast(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        super.decodeLast(ctx, in, out);
+        // RFC 9297 section 3.3 also requires rejecting a partial capsule at clean EOF.
+        if (!failed && (in.isReadable() || bytesToDiscard != 0)) {
+            fail(ctx, in);
+        }
+    }
+
+    private void fail(ChannelHandlerContext ctx, ByteBuf in) {
+        failed = true;
+        bytesToDiscard = 0;
+        in.skipBytes(in.readableBytes());
+        // Capsule errors are malformed HTTP messages, scoped to this CONNECT stream.
+        QuicStreamChannel stream = (QuicStreamChannel) ctx.channel();
+        WebTransportSessionRegistry registry = WebTransportSessionRegistry.get(stream.parent());
+        if (registry != null) {
+            WebTransportSession session = registry.find(stream.streamId());
+            if (session != null) {
+                session.terminate(0, "");
+            }
+        }
+        stream.shutdown(Http3ErrorCode.H3_MESSAGE_ERROR.code);
     }
 
     @Override
